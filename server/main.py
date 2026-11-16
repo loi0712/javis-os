@@ -13990,6 +13990,78 @@ async def market_paper_close(payload: dict = Body(None)):
     return {"ok": ok}
 
 
+@app.get("/market/learn")
+async def market_learn_get(kind: str = "vn"):
+    """The paper account's last self-review: patterns found, proposals waiting, rules in force and their history."""
+    import market_learn
+    if not _paper_kind(kind):
+        return _market_err(ValueError(kind), 400)
+    return await asyncio.to_thread(market_learn.latest, kind)
+
+
+_LEARN_TASKS: set = set()
+
+
+@app.post("/market/learn/run")
+async def market_learn_run(payload: dict = Body(None)):
+    """Start a self-review now (about a minute); the page polls /market/learn until it is done."""
+    import market_learn
+    kind = _paper_kind(str((payload or {}).get("kind") or ""))
+    if not kind:
+        return _market_err(ValueError("kind"), 400)
+    if market_learn.running(kind):
+        return {"ok": True, "running": True}
+    await _paper_section(kind)   # group names and sectors for the replay
+    t = asyncio.get_running_loop().create_task(asyncio.to_thread(market_learn.run_review, kind, False))
+    _LEARN_TASKS.add(t)
+    t.add_done_callback(_LEARN_TASKS.discard)
+    return {"ok": True, "running": True}
+
+
+@app.post("/market/learn/decide")
+async def market_learn_decide(payload: dict = Body(None)):
+    import market_learn
+    p = payload or {}
+    try:
+        pid = int(p.get("id"))
+    except (TypeError, ValueError):
+        return _market_err(ValueError("id"), 400)
+    res = await asyncio.to_thread(market_learn.decide_proposal, pid, str(p.get("action") or ""))
+    if not res.get("ok"):
+        res["error"] = localefmt.chu("Đề xuất này không còn chờ duyệt.", "This proposal is no longer waiting.")
+    return res
+
+
+@app.post("/market/learn/undo")
+async def market_learn_undo(payload: dict = Body(None)):
+    import market_paper
+    try:
+        lid = int((payload or {}).get("id"))
+    except (TypeError, ValueError):
+        return _market_err(ValueError("id"), 400)
+    res = await asyncio.to_thread(market_paper.undo_rule, lid)
+    if not res:
+        return {"ok": False, "error": localefmt.chu("Thay đổi này đã được hoàn tác.", "This change was already undone.")}
+    return {"ok": True, **res}
+
+
+@app.get("/market/factors")
+async def market_factors_get(kind: str = "vn"):
+    """Groups of a market (VN sectors, world groups, crypto categories): drivers known, measured and now."""
+    import market_factors
+    import market_learn
+    if not _paper_kind(kind):
+        return _market_err(ValueError(kind), 400)
+    data = await _paper_section(kind)
+    try:
+        res = await asyncio.to_thread(market_factors.cached, kind, data.get("rows"))
+    except Exception as e:  # noqa: BLE001
+        return _market_err(e)
+    res = dict(res, groups=[dict(g, name=localefmt.chu(*market_learn.GROUP_NAMES.get(g["key"], (g["key"], g["key"]))))
+                            for g in res.get("groups") or []])
+    return res
+
+
 _PAPER_SIM: dict = {}
 
 
@@ -14022,6 +14094,14 @@ def _paper_tg_target() -> str:
         return ""
 
 
+async def _paper_tg_text(text: str) -> None:
+    target = _paper_tg_target()
+    if target:
+        ok, err = await _tg_send_to(target, text)
+        if not ok:
+            print(f"[paper] telegram review: {err}", file=sys.stderr)
+
+
 async def _paper_tg_send(kind: str, fills: list) -> None:
     import market_paper
     target = _paper_tg_target()
@@ -14046,13 +14126,25 @@ def _paper_notifier(loop):
     return notify
 
 
+def _learn_notifier(loop):
+    """The weekly self-review of a paper account goes to the owner's Telegram too (same switch as trade alerts)."""
+    def notify(kind, text):
+        import market_live
+        if not market_live.settings().get("paper_telegram", True) or not _paper_tg_target():
+            return
+        asyncio.run_coroutine_threadsafe(_paper_tg_text(text), loop)
+    return notify
+
+
 @app.on_event("startup")
 async def _market_background_start():
     """Markets page: keep prices fresh and archived even when nobody has the page open (market_live.py).
     Off with the page toggle or JAVIS_MARKET_BACKGROUND=0 (tests set it)."""
     try:
+        import market_learn
         import market_paper
         market_paper.set_notifier(_paper_notifier(asyncio.get_running_loop()))
+        market_learn.set_notifier(_learn_notifier(asyncio.get_running_loop()))
     except Exception as e:  # noqa: BLE001
         print(f"[market] paper notifier: {type(e).__name__}: {e}", file=sys.stderr)
     try:

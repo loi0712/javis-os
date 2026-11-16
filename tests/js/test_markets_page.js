@@ -72,5 +72,22 @@ check("same placeholders in both languages", mk.every((k) => {
 }));
 check("no Vietnamese text in the code", !/[àáảãạăằắẳẵặâầấẩẫậđèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵ]/i.test(src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")));
 
+// Paper trading: the self-review card and the sector drivers card render from the API shapes.
+const lh = H.learnHtml({ kind: "crypto", running: false, insights: ["a <b> pattern"], review: { at: 1, days: 241, samples: 14687, closed: 3, horizon: 10,
+  rejected: [{ key: "pb_rsi_hi" }], groups: [{ key: "defi", name: "DeFi", n: 80, mean: 2.4, win: 55 }] },
+  pending: [{ id: 7, key: "factor_min", text: "Skip buys -100 -> -33" }],
+  rules: { rules: [{ key: "factor_min", name: "Factor", default: -100, value: -33, changed: true }], log: [{ id: 3, key: "factor_min", undone: false }] },
+  history: [{ text: "old one", status: "applied" }] });
+check("self-review: a proposal has apply and dismiss buttons", lh.indexOf('data-ppprop="7|apply"') > 0 && lh.indexOf('data-ppprop="7|reject"') > 0);
+check("self-review: a changed rule can be undone", lh.indexOf('data-ppundo="3"') > 0);
+check("self-review: text from the server is escaped", lh.indexOf("a <b> pattern") < 0 && lh.indexOf("a &lt;b&gt; pattern") > 0);
+check("self-review: before the first review the run button is there", H.learnHtml({ kind: "vn", review: null }).indexOf('data-pplearn="run"') > 0);
+H.S.facOpen["vn|bank"] = true;
+const fh = H.facHtml({ kind: "vn", groups: [{ key: "bank", name: "Banks", count: 17, score: -50, rs_1m: -0.9, members: ["VCB"], watch: ["Credit growth"],
+  drivers: [{ key: "us10y", name: "US 10Y", sign: -1, why: "rates", corr: -0.23, confirmed: true, trend: 1, chg_1m: 2.1, effect: -1 },
+            { key: "usdvnd", name: "USD/VND", sign: -1, why: "fx", missing: true }] }] });
+check("drivers: an open group shows its drivers and what to watch", fh.indexOf('data-ppfac="bank"') > 0 && fh.indexOf("US 10Y") > 0 && fh.indexOf("Credit growth") > 0);
+check("drivers: an empty market says so", H.facHtml({ kind: "vn", groups: [] }).indexOf("mk-muted") > 0);
+
 if (fails) { console.log("\n" + fails + " FAIL"); process.exit(1); }
 console.log("\nall ok");

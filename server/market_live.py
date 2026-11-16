@@ -94,9 +94,32 @@ async def _loop():
                         except Exception as e:  # noqa: BLE001 - one market failing must not stop the others
                             _STATUS["errors"] += 1
                             _STATUS["last_error"] = f"{kind}: {type(e).__name__}: {e}"[:300]
+            await _maybe_learn()
         except Exception as e:  # noqa: BLE001
             print(f"[market] background loop: {type(e).__name__}: {e}", file=sys.stderr)
         await asyncio.sleep(10)
+
+
+_LEARN = {"checked": 0.0, "task": None}
+
+
+async def _maybe_learn() -> None:
+    """The paper accounts' weekly self-review (market_learn), one market at a time, checked every 10 minutes."""
+    now = time.time()
+    if now - _LEARN["checked"] < 600 or (_LEARN["task"] and not _LEARN["task"].done()):
+        return
+    _LEARN["checked"] = now
+    import market_learn
+
+    def work():
+        for kind in ("crypto", "vn", "world"):
+            if market_learn.due(kind):
+                market_learn.mark_try(kind)
+                try:
+                    market_learn.run_review(kind)
+                except Exception as e:  # noqa: BLE001 - one market failing must not block the others
+                    print(f"[market] learn {kind}: {type(e).__name__}: {e}", file=sys.stderr)
+    _LEARN["task"] = asyncio.get_running_loop().create_task(asyncio.to_thread(work))
 
 
 def start() -> bool:

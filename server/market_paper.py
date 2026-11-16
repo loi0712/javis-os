@@ -21,6 +21,16 @@ The rules (one pure function, `decide()`, shared by live trading and the histori
     highest close. Half the position is sold at +3R. A broken trend (score <= -20 or price 2% under MA50) closes it.
 These limit losses and let gains run; they do not guarantee a profit, and the page says so.
 
+Capital deployment (owner, 2026-11-16: too much money went in at the start, no DCA, nothing for a falling market):
+  * Ramp: a new account may hold 30% of equity in positions, rising to the regime cap over 4 weeks.
+  * World core ETFs are bought in 4 weekly tranches (DCA) and not topped up after that.
+  * Crypto picks start at half their planned size and get the rest at +1R with the stop moved to entry (scale-in).
+    Vietnam and World buy the full size: on the 250-session replays splitting lowered their return.
+  * Falling market (risk-off breadth and the benchmark under its 50-day average): the trailing stop tightens to
+    2 x ATR and, once a day, up to two of the weakest picks are sold until picks are back near 40% of equity.
+Rules can change only through `set_rule` (the owner, or an approved weekly proposal from market_learn.py), inside
+the bounds in TUNABLE, and every change is logged and can be undone.
+
 Every trade stores the analysis behind it; every run stores what was considered and why symbols were skipped.
 Tables live in market.db next to the history archive (market_store.py). Blocking sqlite: run in a thread.
 """
@@ -34,6 +44,7 @@ import threading
 import time
 
 import market_store as ms
+from market_factors import group_of
 
 PARAMS = {
     "vn": {"cash": 1_000_000_000, "ccy": "VND", "unit": 1000, "lot": 100, "max_pos": 8, "risk": 0.01, "max_w": 0.15,
@@ -52,7 +63,25 @@ PARAMS = {
 STYLE = {"vn": "pullback", "crypto": "pullback", "world": "momentum"}
 EXPOSURE = {"risk_on": 0.9, "neutral": 0.6, "risk_off": 0.3, "unknown": 0.3}
 ENTRY = {"score": 35, "rsi_lo": 45, "rsi_hi": 70, "cooldown_days": 5, "take_profit_r": 3.0, "trend_exit": -20,
-         "style": None, "pb_score": 0, "pb_rsi_lo": 38, "pb_rsi_hi": 55, "ma_exit": True, "timing": True}
+         "style": None, "pb_score": 0, "pb_rsi_lo": 38, "pb_rsi_hi": 55, "ma_exit": True, "timing": True,
+         # capital deployment (owner, 2026-11-16: "vào vốn với số lượng lớn trong giai đoạn đầu")
+         "ramp_weeks": 4, "ramp_floor": 0.3,          # a new account may hold 30% in picks, rising to the regime cap
+         "first_tranche": 1.0, "add_at_r": 1.0,       # share of the planned size bought first; the rest at +1R
+         "core_tranches": 4, "core_every_days": 7,    # World core ETFs: weekly DCA to the target weight
+         "defend": 1, "defend_trail_atr": 2.0, "defend_max_sells": 2,  # falling market: tighter trail, trim weakest
+         "avoid_sectors": [], "factor_weight": 0.0,   # learned: groups to skip, weight of the macro tailwind in ranking,
+         "factor_min": -100}                          # and the lowest macro factor score a buy accepts (-100: off)
+# Per-market defaults that differ, chosen on 250-session replays of the archive (2026-11-16): splitting entries in
+# two cut crypto's worst drawdown from -6.7% to -5.2% at about the same return, but lowered the return in Vietnam
+# (+0.6% -> -1.3%) and World (-3.6% -> -6.9%), so only crypto starts with half the size.
+KIND_ENTRY = {"crypto": {"first_tranche": 0.5}}
+# What the weekly review may propose to change, with the range it may never leave. The owner approves each change.
+TUNABLE = {
+    "score": (20, 60), "rsi_lo": (35, 55), "rsi_hi": (60, 80), "pb_score": (-10, 40), "pb_rsi_lo": (30, 50),
+    "pb_rsi_hi": (45, 70), "cooldown_days": (2, 15), "take_profit_r": (2.0, 4.0), "stop_atr": (1.5, 3.5),
+    "trail_atr": (2.0, 4.0), "first_tranche": (0.34, 1.0), "ramp_weeks": (0, 8), "defend": (0, 1),
+    "factor_weight": (0.0, 0.5), "factor_min": (-100, 0), "avoid_sectors": None,
+}
 KINDS = tuple(PARAMS)
 _LOCK = threading.Lock()
 # Called as notifier(kind, fills) after every committed live buy or sell (main.py sends it to the owner's Telegram).
@@ -87,7 +116,15 @@ def _db() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS paper_equity (kind TEXT, ts REAL, equity REAL, cash REAL, bench REAL,
             PRIMARY KEY (kind, ts));
         CREATE TABLE IF NOT EXISTS paper_log (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, at REAL, data TEXT);
+        CREATE TABLE IF NOT EXISTS paper_rules (kind TEXT, key TEXT, value TEXT, set_at REAL, source TEXT,
+            PRIMARY KEY (kind, key));
+        CREATE TABLE IF NOT EXISTS paper_rule_log (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, key TEXT, old TEXT,
+            new TEXT, at REAL, source TEXT, proposal INTEGER, undone INTEGER DEFAULT 0);
     """)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(paper_positions)")}
+    for col, typ in (("plan_qty", "REAL"), ("adds", "INTEGER DEFAULT 0"), ("last_add", "REAL")):
+        if col not in cols:
+            con.execute(f"ALTER TABLE paper_positions ADD COLUMN {col} {typ}")
     return con
 
 
@@ -110,8 +147,19 @@ def universe(kind: str, rows: list) -> list:
     return out
 
 
-def stop_for(kind: str, price: float, atr_pct) -> float:
-    p = PARAMS[kind]
+def effective(kind: str, rules: dict | None = None) -> tuple[dict, dict]:
+    """The parameters an account trades with: the written defaults, then every rule change the owner approved."""
+    p, e = dict(PARAMS[kind]), {**ENTRY, **KIND_ENTRY.get(kind, {})}
+    for k, v in (rules or {}).items():
+        if k in p:
+            p[k] = v
+        elif k in e:
+            e[k] = v
+    return p, e
+
+
+def stop_for(kind: str, price: float, atr_pct, p: dict | None = None) -> float:
+    p = p or PARAMS[kind]
     dist = (atr_pct or 0) / 100 * p["stop_atr"]
     dist = min(max(dist, p["stop_min"]), p["stop_max"])
     return price * (1 - dist)
@@ -124,14 +172,27 @@ def _lot(kind: str, qty: float) -> float:
     return math.floor(qty * 1e6) / 1e6
 
 
-def decide(kind: str, state: dict, rows: list, regime: dict, now: float, allow_entries: bool) -> dict:
-    """One trading pass. state = {"cash", "positions": {sym: pos}, "recent_sells": {sym: ts}}.
-    Returns {"orders": [...], "log": {...}} without touching any storage."""
-    p = PARAMS[kind]
+def ramp_cap(e: dict, started, now: float) -> float:
+    """Ceiling on the share of equity in stock picks while a new account deploys its cash in stages."""
+    weeks = e.get("ramp_weeks") or 0
+    if not started or weeks <= 0:
+        return 1.0
+    age = max(0.0, (now - started) / (7 * 86400))
+    floor = e.get("ramp_floor", 0.3)
+    return min(1.0, floor + (1 - floor) * age / weeks)
+
+
+def decide(kind: str, state: dict, rows: list, regime: dict, now: float, allow_entries: bool,
+           rules: dict | None = None) -> dict:
+    """One trading pass. state = {"cash", "positions": {sym: pos}, "recent_sells": {sym: ts}, "started"?}.
+    `rules` are the owner-approved changes to the defaults (`effective`). Returns {"orders", "log"}, touching no storage."""
+    p, E = effective(kind, rules)
     unit = p["unit"]
     by = {(r.get("id") or r.get("symbol")): r for r in universe(kind, rows)}
     positions = state.get("positions") or {}
     orders, skipped, considered, watch = [], [], [], []
+    style = E.get("style") or STYLE.get(kind)
+    pullback = style == "pullback"
 
     def mark(sym):
         r = by.get(sym)
@@ -139,7 +200,12 @@ def decide(kind: str, state: dict, rows: list, regime: dict, now: float, allow_e
 
     equity = state["cash"] + sum(pos["qty"] * mark(s) * unit for s, pos in positions.items())
     label = (regime or {}).get("label") or "unknown"
-    cap = EXPOSURE.get(label, 0.3)
+    ramp = ramp_cap(E, state.get("started"), now)
+    cap = min(EXPOSURE.get(label, 0.3), ramp)
+    # A falling market: risk-off breadth AND the benchmark under its 50-day average. Then trailing stops tighten and,
+    # once a day, the weakest picks are sold until the book is back near the risk-off exposure.
+    defending = bool(E.get("defend")) and label == "risk_off" and (regime or {}).get("bench_up") is False
+    trail_atr = E["defend_trail_atr"] if defending else p["trail_atr"]
 
     # ---- exits first
     core = p.get("core") or {}
@@ -155,7 +221,7 @@ def decide(kind: str, state: dict, rows: list, regime: dict, now: float, allow_e
             continue
         atr_abs = (r.get("atr_pct") or 0) / 100 * price
         high = max(pos.get("high") or pos["avg"], price)
-        trail = high - p["trail_atr"] * atr_abs if atr_abs else None
+        trail = high - trail_atr * atr_abs if atr_abs else None
         stop = pos["stop"]
         # The trailing stop only takes over once the position is at least 1R in profit; before that the entry stop
         # rules (a 3 x ATR trail would sit above a 5% minimum stop on quiet stocks and sell them on noise).
@@ -167,10 +233,10 @@ def decide(kind: str, state: dict, rows: list, regime: dict, now: float, allow_e
         init_stop = pos["avg"] - (pos.get("risk0") or 0) if pos.get("risk0") else pos["stop"]
         if price <= stop:
             reason = "trail" if stop > init_stop + 1e-12 else "stop"
-        elif (r.get("score") or 0) <= ENTRY["trend_exit"] or (ENTRY.get("ma_exit", True) and r.get("sma50") and price < r["sma50"] * 0.98):
+        elif (r.get("score") or 0) <= E["trend_exit"] or (E.get("ma_exit", True) and r.get("sma50") and price < r["sma50"] * 0.98):
             reason = "trend"
         qty = pos["qty"]
-        if not reason and not pos.get("partial") and r0 and price >= pos["avg"] + ENTRY["take_profit_r"] * r0:
+        if not reason and not pos.get("partial") and r0 and price >= pos["avg"] + E["take_profit_r"] * r0:
             reason, qty = "take_profit", _lot(kind, pos["qty"] / 2)
         if reason and qty > 0:
             if not can_sell:
@@ -181,36 +247,66 @@ def decide(kind: str, state: dict, rows: list, regime: dict, now: float, allow_e
         elif high > (pos.get("high") or 0) or stop > pos["stop"]:
             orders.append({"side": "update", "symbol": sym, "high": high, "stop": max(stop, pos["stop"])})
 
-    # ---- entries
     selling = {o["symbol"] for o in orders if o["side"] == "sell" and o["qty"] >= positions[o["symbol"]]["qty"]}
     held = set(positions) - selling
+
+    # ---- defend: trim the weakest picks in a falling market, once a day (the decision window)
+    if defending and allow_entries:
+        limit = EXPOSURE["risk_off"] + 0.1
+        picks = [s for s in held if s not in core and s in by and now >= (positions[s].get("sellable") or 0)]
+        inv_picks = sum(positions[s]["qty"] * mark(s) * unit for s in held if s not in core)
+        sold = 0
+        for s in sorted(picks, key=lambda s: (by[s].get("score") or 0, by[s]["price"] / positions[s]["avg"])):
+            if inv_picks <= limit * equity or sold >= E["defend_max_sells"]:
+                break
+            r = by[s]
+            orders.append({"side": "sell", "symbol": s, "qty": positions[s]["qty"], "price": r["price"], "reason": "defend",
+                           "analysis": _analysis(kind, r, regime, extra={"entry": positions[s]["avg"], "defend": True})})
+            inv_picks -= positions[s]["qty"] * r["price"] * unit
+            held.discard(s)
+            selling.add(s)
+            sold += 1
+
     invested = sum(positions[s]["qty"] * mark(s) * unit for s in held)
     cash = state["cash"] + sum(o["qty"] * o["price"] * unit * (1 - p["slip"] - p["fee_sell"])
                                for o in orders if o["side"] == "sell")
     # Core index positions (World): follow their own 200-day trend only, whatever the stock-picking filter says.
+    # Bought in weekly tranches (DCA) up to their target weight instead of in one go.
     if allow_entries:
         for sym, w in core.items():
             r = by.get(sym)
-            if not r or sym in held or not r.get("sma200"):
+            if not r or sym in selling or not r.get("sma200"):
                 continue
             if r["price"] < r["sma200"]:
                 skipped.append({"symbol": sym, "why": "core_below_sma200"})
+                continue
+            pos = positions.get(sym)
+            target = w * equity
+            have = pos["qty"] * r["price"] * unit if pos else 0.0
+            # built: the target reached, or every DCA tranche bought (no weekly top-ups after that; a fall in price is
+            # not a reason to buy more of a position that is already full)
+            if have >= target * 0.97 or (pos and (pos.get("adds") or 0) >= E["core_tranches"] - 1):
+                continue
+            if pos and now - (pos.get("last_add") or pos.get("opened") or 0) < E["core_every_days"] * 86400 - 6 * 3600:
+                skipped.append({"symbol": sym, "why": "core_dca_wait"})
                 continue
             if (r.get("chg_1d") or 0) < -1.5:
                 watch.append({"symbol": sym, "name": r.get("name") or sym, "price": r["price"], "zone": None,
                               "why": "falling_today", "score": r.get("score") or 0, "rsi": _r(r.get("rsi"), 1)})
                 continue
             price = r["price"] * (1 + p["slip"])
-            qty = _lot(kind, min(w * equity, cash / (1 + p["fee_buy"])) / (price * unit))
+            tranche = target / max(1, E["core_tranches"])
+            qty = _lot(kind, min(tranche, target - have, cash / (1 + p["fee_buy"])) / (price * unit))
             if qty <= 0:
                 continue
             cash -= qty * price * unit * (1 + p["fee_buy"])
             invested += qty * price * unit
             held = held | {sym}
             orders.append({"side": "buy", "symbol": sym, "qty": qty, "price": r["price"], "stop": r["sma200"] * 0.98,
-                           "name": r.get("name") or sym, "reason": "core",
+                           "name": r.get("name") or sym, "reason": "core_add" if pos else "core",
                            "analysis": _analysis(kind, r, regime, stop=r["sma200"] * 0.98, extra={
-                               "core": True, "weight": round(qty * price * unit / equity * 100, 2) if equity else None})})
+                               "core": True, "target_weight": round(w * 100, 1),
+                               "weight": round((have + qty * price * unit) / equity * 100, 2) if equity else None})})
     if not allow_entries:
         pass
     elif label == "risk_off":
@@ -218,6 +314,30 @@ def decide(kind: str, state: dict, rows: list, regime: dict, now: float, allow_e
     elif (regime or {}).get("bench_up") is False:
         skipped.append({"symbol": "*", "why": "bench_down"})
     else:
+        # ---- scale in: a pick bought with its first tranche gets the rest once it proves itself (+1R, trend intact).
+        # The stop then moves up to the first entry, so the larger position risks little more than the first one did.
+        for sym in sorted(held - set(core)):
+            pos, r = positions[sym], by.get(sym)
+            if not r or pos.get("adds") or pos.get("partial") or not pos.get("plan_qty") or pos["plan_qty"] <= pos["qty"]:
+                continue
+            r0 = pos.get("risk0") or 0
+            if not r0 or r["price"] < pos["avg"] + E["add_at_r"] * r0:
+                continue
+            if (r.get("sma20") and r["price"] < r["sma20"]) or (r.get("score") or 0) < 0:
+                continue
+            price = r["price"] * (1 + p["slip"])
+            room = cap * equity - invested
+            qty = _lot(kind, min((pos["plan_qty"] - pos["qty"]) * price * unit, room, cash / (1 + p["fee_buy"])) / (price * unit))
+            if qty <= 0 or qty * price * unit < equity * 0.005:
+                continue
+            cash -= qty * price * unit * (1 + p["fee_buy"])
+            invested += qty * price * unit
+            new_stop = max(pos["stop"], pos["avg"])
+            orders.append({"side": "buy", "symbol": sym, "qty": qty, "price": r["price"], "stop": new_stop,
+                           "name": pos.get("name") or sym, "reason": "add",
+                           "analysis": _analysis(kind, r, regime, stop=new_stop, extra={
+                               "entry": pos["avg"], "r_now": round((r["price"] - pos["avg"]) / r0, 2)})})
+        avoid = set(E.get("avoid_sectors") or [])
         cands = []
         for sym, r in by.items():
             if sym in held:
@@ -227,16 +347,15 @@ def decide(kind: str, state: dict, rows: list, regime: dict, now: float, allow_e
             price = r["price"]
             if sym in core or r.get("group") == "etf":
                 continue
-            if score < (ENTRY["pb_score"] if (ENTRY.get("style") or STYLE.get(kind)) == "pullback" else ENTRY["score"]):
+            if score < (E["pb_score"] if pullback else E["score"]):
                 continue  # not a candidate at all
-            pullback = (ENTRY.get("style") or STYLE.get(kind)) == "pullback"
             if pullback and not (r.get("sma50") and r.get("sma200") and price > r["sma50"] > r["sma200"]):
                 why = "ma_order"
-            elif pullback and not (ENTRY["pb_rsi_lo"] <= rsi <= ENTRY["pb_rsi_hi"]):
+            elif pullback and not (E["pb_rsi_lo"] <= rsi <= E["pb_rsi_hi"]):
                 why = "rsi"
             elif pullback and r.get("sma20") and not (0.97 * r["sma20"] <= price <= 1.02 * r["sma20"]):
                 why = "not_pullback"
-            elif not pullback and not (ENTRY["rsi_lo"] <= rsi <= ENTRY["rsi_hi"]):
+            elif not pullback and not (E["rsi_lo"] <= rsi <= E["rsi_hi"]):
                 why = "rsi"
             elif not pullback and not (r.get("sma20") and r.get("sma50") and price > r["sma20"] > r["sma50"]):
                 why = "ma_order"
@@ -244,10 +363,14 @@ def decide(kind: str, state: dict, rows: list, regime: dict, now: float, allow_e
                 why = "below_sma200"
             elif p["min_value"] and (r.get("value") or 0) < p["min_value"]:
                 why = "liquidity"
-            elif now - (state.get("recent_sells") or {}).get(sym, 0) < ENTRY["cooldown_days"] * 86400:
+            elif now - (state.get("recent_sells") or {}).get(sym, 0) < E["cooldown_days"] * 86400:
                 why = "cooldown"
-            zone = buy_zone(r, (ENTRY.get("style") or STYLE.get(kind)) == "pullback")
-            if not why and ENTRY.get("timing", True) and zone:
+            elif avoid and group_of(kind, r) in avoid:
+                why = "sector_avoid"
+            elif E.get("factor_min", -100) > -100 and r.get("factor") is not None and r["factor"] < E["factor_min"]:
+                why = "factor_headwind"
+            zone = buy_zone(r, pullback)
+            if not why and E.get("timing", True) and zone:
                 # Entry timing per symbol: never chase a price that ran far above its 20-day average, never buy into
                 # a falling day; such symbols wait on the watch list with the price zone that would be acceptable.
                 if price > zone[1]:
@@ -267,7 +390,8 @@ def decide(kind: str, state: dict, rows: list, regime: dict, now: float, allow_e
                 skipped.append({"symbol": sym, "why": why})
             else:
                 cands.append(r)
-        cands.sort(key=lambda r: -((r.get("score") or 0) + 0.3 * (r.get("chg_3m") or 0)))
+        fw = E.get("factor_weight") or 0
+        cands.sort(key=lambda r: -((r.get("score") or 0) + 0.3 * (r.get("chg_3m") or 0) + fw * (r.get("factor") or 0)))
         slots = p["max_pos"] - len(held - set(core))
         for r in cands:
             sym = r.get("id") or r.get("symbol")
@@ -276,36 +400,49 @@ def decide(kind: str, state: dict, rows: list, regime: dict, now: float, allow_e
                 continue
             room = cap * equity - invested
             if room <= equity * 0.02:
-                skipped.append({"symbol": sym, "why": "exposure_cap"})
+                skipped.append({"symbol": sym, "why": "ramp" if ramp < EXPOSURE.get(label, 0.3) else "exposure_cap"})
                 continue
             price = r["price"] * (1 + p["slip"])
-            stop = stop_for(kind, r["price"], r.get("atr_pct"))
+            stop = stop_for(kind, r["price"], r.get("atr_pct"), p)
             risk_per = (price - stop) * unit
             if risk_per <= 0:
                 continue
-            budget = min(equity * p["risk"] / risk_per * price * unit, equity * p["max_w"], room,
-                         cash / (1 + p["fee_buy"]))
-            qty = _lot(kind, budget / (price * unit))
+            budget = min(equity * p["risk"] / risk_per * price * unit, equity * p["max_w"])
+            plan_qty = _lot(kind, budget / (price * unit))
+            # First tranche only; the rest waits for the position to prove itself (scale in above).
+            first = _lot(kind, plan_qty * E["first_tranche"]) or plan_qty
+            qty = _lot(kind, min(first * price * unit, room, cash / (1 + p["fee_buy"])) / (price * unit))
             if qty <= 0 or qty * price * unit < equity * 0.01:
                 skipped.append({"symbol": sym, "why": "cash"})
                 continue
-            cost = qty * price * unit * (1 + p["fee_buy"])
-            cash -= cost
+            cash -= qty * price * unit * (1 + p["fee_buy"])
             invested += qty * price * unit
             slots -= 1
-            orders.append({"side": "buy", "symbol": sym, "qty": qty, "price": r["price"], "stop": stop,
+            plan_qty = max(plan_qty, qty)
+            orders.append({"side": "buy", "symbol": sym, "qty": qty, "price": r["price"], "stop": stop, "plan_qty": plan_qty,
                            "name": r.get("name") or r.get("symbol"), "reason": "entry",
                            "analysis": _analysis(kind, r, regime, stop=stop, extra={
-                               "risk_amount": round(qty * (price - stop) * unit, 2),
+                               "risk_amount": round(qty * (price - stop) * unit, 2), "plan_qty": plan_qty,
                                "weight": round(qty * price * unit / equity * 100, 2) if equity else None,
-                               "target_r3": _r(price + ENTRY["take_profit_r"] * (price - stop))})})
-    log = {"at": now, "regime": label, "cap": cap, "equity": round(equity, 2), "bench_up": (regime or {}).get("bench_up"),
+                               "target_r3": _r(price + E["take_profit_r"] * (price - stop))})})
+    log = {"at": now, "regime": label, "cap": round(cap, 3), "ramp": round(ramp, 3), "defending": defending,
+           "equity": round(equity, 2), "bench_up": (regime or {}).get("bench_up"),
            "invested_pct": round(invested / equity * 100, 1) if equity else 0, "allow_entries": allow_entries,
            "considered": sorted(considered, key=lambda c: -c["score"])[:25], "skipped": skipped[:40],
            "watch": sorted(watch, key=lambda w: -w["score"])[:15],
            "actions": [{"side": o["side"], "symbol": o["symbol"], "qty": o["qty"], "price": o["price"], "reason": o["reason"]}
                        for o in orders if o["side"] != "update"]}
     return {"orders": orders, "log": log}
+
+
+def with_factor(kind: str, rows: list) -> list:
+    """Rows with their group's macro factor score now (market_factors, cached an hour). Missing data: no score."""
+    try:
+        import market_factors as mf
+        sym = mf.cached(kind).get("symbols") or {}
+    except Exception:  # noqa: BLE001 - a rule that cannot see the factor simply does not use it
+        return rows
+    return [dict(r, factor=(sym.get(r.get("id") or r.get("symbol")) or {}).get("factor")) for r in rows]
 
 
 def buy_zone(r: dict, pullback: bool) -> tuple | None:
@@ -353,12 +490,117 @@ def _account(con, kind):
 
 def _positions(con, kind):
     out = {}
-    for sym, qty, avg, opened, stop, high, risk0, partial, sellable, name in con.execute(
-            "SELECT symbol, qty, avg, opened, stop, high, risk0, partial, sellable, name FROM paper_positions WHERE kind=?",
-            (kind,)):
+    for sym, qty, avg, opened, stop, high, risk0, partial, sellable, name, plan_qty, adds, last_add in con.execute(
+            "SELECT symbol, qty, avg, opened, stop, high, risk0, partial, sellable, name, plan_qty, adds, last_add "
+            "FROM paper_positions WHERE kind=?", (kind,)):
         out[sym] = {"qty": qty, "avg": avg, "opened": opened, "stop": stop, "high": high, "risk0": risk0,
-                    "partial": bool(partial), "sellable": sellable, "name": name}
+                    "partial": bool(partial), "sellable": sellable, "name": name, "plan_qty": plan_qty,
+                    "adds": adds or 0, "last_add": last_add}
     return out
+
+
+def merge_buy(pos: dict | None, qty: float, price: float, stop: float, now: float, sellable: float,
+              plan_qty: float | None = None, name: str = "") -> dict:
+    """A position after a buy: a new one, or a held one topped up (scale-in, core DCA) at a weighted average price.
+    A top-up keeps the first settlement day: the T+2 lock of the added shares is not tracked separately."""
+    if not pos:
+        return {"qty": qty, "avg": price, "opened": now, "stop": stop, "high": price, "risk0": price - stop,
+                "partial": False, "sellable": sellable, "name": name, "plan_qty": plan_qty or qty, "adds": 0, "last_add": now}
+    total = pos["qty"] + qty
+    return dict(pos, qty=total, avg=(pos["qty"] * pos["avg"] + qty * price) / total, stop=max(stop, pos["stop"]),
+                high=max(pos.get("high") or price, price), adds=(pos.get("adds") or 0) + 1, last_add=now,
+                plan_qty=max(pos.get("plan_qty") or 0, total))
+
+
+# ---------------------------------------------------------------- learned rules (approved by the owner)
+
+def rules_for(kind: str, con=None) -> dict:
+    """The rule changes the owner approved for an account, {key: value}."""
+    own = con is None
+    con = con or _db()
+    try:
+        return {k: json.loads(v) for k, v in con.execute("SELECT key, value FROM paper_rules WHERE kind=?", (kind,))}
+    finally:
+        if own:
+            con.close()
+
+
+def _default(kind: str, key: str):
+    p, e = effective(kind)
+    return p[key] if key in p else e.get(key)
+
+
+def clamp_rule(kind: str, key: str, value):
+    """A value forced inside the key's TUNABLE range, with the type of its default."""
+    if key not in TUNABLE:
+        raise ValueError(key)
+    rng = TUNABLE[key]
+    if rng is None:
+        return sorted({str(x) for x in (value or [])})
+    v = min(max(float(value), rng[0]), rng[1])
+    return int(round(v)) if isinstance(_default(kind, key), int) else round(v, 3)
+
+
+def set_rule(kind: str, key: str, value, source: str = "owner", proposal: int | None = None) -> dict:
+    """Change one rule (inside its TUNABLE range). Returns the log entry; `undo_rule` takes it back."""
+    value = clamp_rule(kind, key, value)
+    with _LOCK:
+        con = _db()
+        try:
+            cur = rules_for(kind, con)
+            old = cur.get(key, _default(kind, key))
+            if value == _default(kind, key):
+                con.execute("DELETE FROM paper_rules WHERE kind=? AND key=?", (kind, key))
+            else:
+                con.execute("INSERT OR REPLACE INTO paper_rules VALUES (?,?,?,?,?)", (kind, key, json.dumps(value), time.time(), source))
+            c = con.execute("INSERT INTO paper_rule_log (kind, key, old, new, at, source, proposal) VALUES (?,?,?,?,?,?,?)",
+                            (kind, key, json.dumps(old), json.dumps(value), time.time(), source, proposal))
+            con.commit()
+            return {"id": c.lastrowid, "kind": kind, "key": key, "old": old, "new": value}
+        finally:
+            con.close()
+
+
+def undo_rule(log_id: int) -> dict | None:
+    """Put a rule back to what it was before one change (the default when that change was the first)."""
+    with _LOCK:
+        con = _db()
+        try:
+            row = con.execute("SELECT kind, key, old, undone FROM paper_rule_log WHERE id=?", (log_id,)).fetchone()
+            if not row or row[3]:
+                return None
+            kind, key, old = row[0], row[1], json.loads(row[2])
+            if old == _default(kind, key):
+                con.execute("DELETE FROM paper_rules WHERE kind=? AND key=?", (kind, key))
+            else:
+                con.execute("INSERT OR REPLACE INTO paper_rules VALUES (?,?,?,?,?)", (kind, key, json.dumps(old), time.time(), "undo"))
+            con.execute("UPDATE paper_rule_log SET undone=1 WHERE id=?", (log_id,))
+            con.commit()
+            return {"kind": kind, "key": key, "value": old}
+        finally:
+            con.close()
+
+
+def rule_view(kind: str) -> dict:
+    """Defaults, current values and the change log, for the page."""
+    with _LOCK:
+        con = _db()
+        try:
+            cur = rules_for(kind, con)
+            log = [dict(zip(("id", "key", "old", "new", "at", "source", "proposal", "undone"), r)) for r in con.execute(
+                "SELECT id, key, old, new, at, source, proposal, undone FROM paper_rule_log WHERE kind=? ORDER BY id DESC LIMIT 30",
+                (kind,))]
+        finally:
+            con.close()
+    p1, e1 = effective(kind, cur)
+    out = []
+    for k, rng in TUNABLE.items():
+        d = _default(kind, k)
+        v = p1[k] if k in p1 else e1.get(k)
+        out.append({"key": k, "default": d, "value": v, "changed": d != v, "range": list(rng) if rng else None})
+    for x in log:
+        x["old"], x["new"], x["undone"] = json.loads(x["old"]), json.loads(x["new"]), bool(x["undone"])
+    return {"kind": kind, "rules": out, "log": log}
 
 
 def _recent_sells(con, kind, now):
@@ -436,12 +678,17 @@ def _apply(con, kind: str, orders: list, now: float) -> list:
                 continue
             cash -= value + fee
             sellable = _add_weekdays(now, p["t_plus"]) if p["t_plus"] else now
-            con.execute("INSERT OR REPLACE INTO paper_positions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                        (kind, sym, o["qty"], price, now, o["stop"], price, price - o["stop"], 0, sellable, o.get("name") or sym))
+            x = merge_buy(positions.get(sym), o["qty"], price, o["stop"], now, sellable, o.get("plan_qty"), o.get("name") or sym)
+            positions[sym] = x
+            con.execute("INSERT OR REPLACE INTO paper_positions (kind, symbol, qty, avg, opened, stop, high, risk0, partial, "
+                        "sellable, name, plan_qty, adds, last_add) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (kind, sym, x["qty"], x["avg"], x["opened"], x["stop"], x["high"], x["risk0"], int(x["partial"]),
+                         x["sellable"], x.get("name") or sym, x["plan_qty"], x["adds"], x["last_add"]))
             con.execute("INSERT INTO paper_trades (kind, symbol, side, qty, price, value, fee, at, reason, pnl, pnl_pct, analysis) "
                         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (kind, sym, "buy", o["qty"], price, value, fee, now, "entry", None, None, json.dumps(o.get("analysis") or {})))
-            done.append(dict(o, fill=price, value=value, fee=fee, cash=cash, at=now))
+                        (kind, sym, "buy", o["qty"], price, value, fee, now, o.get("reason") or "entry", None, None,
+                         json.dumps(o.get("analysis") or {})))
+            done.append(dict(o, fill=price, value=value, fee=fee, cash=cash, at=now, held=x["qty"]))
         elif o["side"] == "sell":
             pos = positions.get(sym)
             if not pos:
@@ -537,8 +784,12 @@ def run(kind: str, data: dict, now: float | None = None, force: bool = False, li
                 con.commit()
                 return {}
             allow = entries_allowed(kind, acc, now, force)
-            state = {"cash": acc["cash"], "positions": _positions(con, kind), "recent_sells": _recent_sells(con, kind, now)}
-            res = decide(kind, state, rows, with_bench(data.get("regime"), bench_row), now, allow)
+            state = {"cash": acc["cash"], "positions": _positions(con, kind), "recent_sells": _recent_sells(con, kind, now),
+                     "started": acc["started"]}
+            rules = rules_for(kind, con)
+            if rules.get("factor_weight") or rules.get("factor_min", -100) > -100:
+                rows = with_factor(kind, rows)
+            res = decide(kind, state, rows, with_bench(data.get("regime"), bench_row), now, allow, rules)
             done = _apply(con, kind, res["orders"], now)
             if allow:
                 con.execute("UPDATE paper_accounts SET last_entry=? WHERE kind=?", (now, kind))
@@ -581,6 +832,9 @@ _REASONS = {
     "stop": ("Chạm cắt lỗ", "Stop hit"), "trail": ("Chạm cắt lỗ đuổi (giữ lãi)", "Trailing stop (gain kept)"),
     "trend": ("Gãy xu hướng", "Trend broke"), "take_profit": ("Chốt lời một nửa", "Half take-profit"),
     "core_exit": ("Thoát phần lõi (dưới MA200)", "Core exit (below MA200)"), "manual": ("Bán tay trên trang", "Sold by hand"),
+    "add": ("Mua thêm đợt 2: vị thế đã lãi, cắt lỗ dời lên giá vốn", "Second tranche: position in profit, stop moved to entry"),
+    "core_add": ("Mua định kỳ phần lõi (DCA hằng tuần)", "Scheduled core buy (weekly DCA)"),
+    "defend": ("Thị trường xấu: giảm tỷ trọng mã yếu nhất", "Falling market: trimming the weakest holding"),
 }
 _ACCOUNTS = {"vn": ("Chứng khoán VN", "Vietnam stocks"), "crypto": ("Tiền số", "Crypto"),
              "world": ("Chứng khoán thế giới", "World stocks")}
@@ -626,6 +880,10 @@ def fill_message(kind: str, f: dict) -> str:
         lines.append(chu("Lý do: {r}", "Reason: {r}", r=chu(*why)))
     if buy and f.get("stop"):
         lines.append(chu("Cắt lỗ đặt ở: {s}", "Stop set at: {s}", s=price(f["stop"])))
+    if buy and f.get("held") and f.get("reason") in ("add", "core_add"):
+        lines.append(chu("Đang giữ tổng cộng: {q}", "Now holding: {q}", q=qty(f["held"])))
+    if buy and f.get("held") and f.get("reason") in ("add", "core_add"):
+        lines.append(chu("Đang giữ tổng cộng: {q}", "Now holding: {q}", q=qty(f["held"])))
     if not buy and f.get("pnl") is not None:
         pct = f.get("pnl_pct")
         sign = "+" if f["pnl"] > 0 else ""
@@ -649,7 +907,9 @@ def report(kind: str, data: dict | None = None, live_prices: dict | None = None)
         con = _db()
         try:
             acc = _account(con, kind)
-            plan = {"kind": kind, **p, "exposure": EXPOSURE, "entry": ENTRY}
+            # the plan shown is the one in force: written defaults plus the changes the owner approved
+            pe, ee = effective(kind, rules_for(kind, con))
+            plan = {"kind": kind, **pe, "exposure": EXPOSURE, "entry": ee}
             if not acc:
                 return {"kind": kind, "started": False, "plan": plan}
             pos = _positions(con, kind)
@@ -713,12 +973,8 @@ def report(kind: str, data: dict | None = None, live_prices: dict | None = None)
 
 # ---------------------------------------------------------------- historical simulation
 
-def simulate(kind: str, days: int = 120) -> dict:
-    """Replay the same rules over the archived daily bars: decide on each close, fill at the next session's open.
-    Uses the bars archive (market_store), so it needs the archive to hold enough history."""
-    import market_indicators as mi
-    p = PARAMS[kind]
-    unit = p["unit"]
+def load_bars(kind: str) -> dict:
+    """Every archived daily bar of a market, {symbol: {"d", "o", "h", "l", "c", "v"}}, oldest first."""
     with ms._LOCK:
         con = ms._db()
         try:
@@ -730,8 +986,17 @@ def simulate(kind: str, days: int = 120) -> dict:
                     b[k].append(val)
         finally:
             con.close()
+    return raw
+
+
+def history_rows(kind: str, days: int = 120, raw: dict | None = None) -> list:
+    """What the page would have shown on each of the last `days` closes: [{"d", "ts", "rows", "regime", "opens"}].
+    The slow part of a simulation (indicators per symbol per day), computed once and shared by every replay."""
+    import market_indicators as mi
+    p = PARAMS[kind]
+    raw = raw if raw is not None else load_bars(kind)
     if not raw:
-        return {"ok": False, "error": "no_history"}
+        return []
     meta = _sim_meta(kind)
     if kind == "vn":
         import market_data as md
@@ -739,30 +1004,17 @@ def simulate(kind: str, days: int = 120) -> dict:
             meta.setdefault(s, {"symbol": s})["group"] = "index"
     bench = p["bench"]
     dates = sorted({d for b in raw.values() for d in b["d"][-(days + 1):]})[-(days + 1):]
-    if len(dates) < 20:
-        return {"ok": False, "error": "no_history"}
     idx = {s: {d: i for i, d in enumerate(b["d"])} for s, b in raw.items()}
-    state = {"cash": float(p["cash"]), "positions": {}, "recent_sells": {}}
-    trades, curve, pending = [], [], []
-    last_entry = 0.0
-    for di, day in enumerate(dates):
+    out = []
+    for day in dates:
         ts = _dt.datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=_dt.timezone.utc).timestamp() + 12 * 3600
-        # 1) fill yesterday's orders at today's open
-        if pending:
-            fills = []
-            for o in pending:
-                b, i = raw.get(o["symbol"]), idx.get(o["symbol"], {}).get(day)
-                if b is None or i is None:
-                    continue
-                o = dict(o, price=b["o"][i])
-                fills.append(o)
-            _sim_apply(kind, state, fills, ts, trades)
-            pending = []
-        # 2) rows as of today's close
-        rows = []
+        rows, opens = [], {}
         for sym, b in raw.items():
             i = idx[sym].get(day)
-            if i is None or i < 60:
+            if i is None:
+                continue
+            opens[sym] = b["o"][i]
+            if i < 60:
                 continue
             cut = {"t": list(range(i + 1)), "o": b["o"][:i + 1], "h": b["h"][:i + 1], "l": b["l"][:i + 1],
                    "c": b["c"][:i + 1], "v": b["v"][:i + 1]}
@@ -774,16 +1026,51 @@ def simulate(kind: str, days: int = 120) -> dict:
             row.setdefault("symbol", sym)
             if kind == "crypto":
                 row["id"], row["deep"] = sym, True
+            for k in ("spark", "reasons"):
+                row.pop(k, None)
             rows.append(row)
         bench_row = next((r for r in rows if (r.get("id") or r.get("symbol")) == bench), None)
         reg = with_bench(mi.regime([r for r in universe(kind, rows)], bench_row), bench_row)
+        out.append({"d": day, "ts": ts, "rows": rows, "regime": reg, "opens": opens,
+                    "bench": bench_row["price"] if bench_row else None})
+    return out
+
+
+def simulate(kind: str, days: int = 120, rules: dict | None = None, raw: dict | None = None,
+             hist: list | None = None) -> dict:
+    """Replay the same rules over the archived daily bars: decide on each close, fill at the next session's open.
+    Uses the bars archive (market_store), so it needs the archive to hold enough history. `rules` defaults to the
+    account's approved rules; pass {} for the written defaults, or a candidate set to test a proposal. `hist`
+    (from `history_rows`) lets several replays share one indicator pass."""
+    p = PARAMS[kind]
+    unit = p["unit"]
+    if rules is None:
+        rules = rules_for(kind)
+    if hist is None:
+        hist = history_rows(kind, days, raw)
+    else:
+        hist = hist[-(days + 1):]
+    if len(hist) < 20:
+        return {"ok": False, "error": "no_history"}
+    state = {"cash": float(p["cash"]), "positions": {}, "recent_sells": {}, "started": None}
+    trades, curve, pending = [], [], []
+    last_entry = 0.0
+    for di, h in enumerate(hist):
+        day, ts, rows, reg = h["d"], h["ts"], h["rows"], h["regime"]
+        state["started"] = state["started"] or ts
+        # 1) fill yesterday's orders at today's open
+        if pending:
+            fills = [dict(o, price=h["opens"][o["symbol"]]) for o in pending if h["opens"].get(o["symbol"])]
+            _sim_apply(kind, state, fills, ts, trades)
+            pending = []
+        # 2) decide on today's close
         prices = {(r.get("id") or r.get("symbol")): r["price"] for r in rows}
         eq = state["cash"] + sum(x["qty"] * prices.get(s, x["avg"]) * unit for s, x in state["positions"].items())
-        curve.append({"d": day, "equity": eq, "bench": bench_row["price"] if bench_row else None})
-        if di == len(dates) - 1:
+        curve.append({"d": day, "equity": eq, "bench": h["bench"], "invested": (eq - state["cash"]) / eq * 100 if eq else 0})
+        if di == len(hist) - 1:
             break
         allow = ts - last_entry >= p["entry_every_h"] * 3600 - 1
-        res = decide(kind, state, rows, reg, ts, allow)
+        res = decide(kind, state, rows, reg, ts, allow, rules)
         if allow:
             last_entry = ts
         for o in res["orders"]:
@@ -810,6 +1097,7 @@ def simulate(kind: str, days: int = 120) -> dict:
             "trades": len(trades), "closed": len(sells), "win_rate": len(wins) / len(sells) * 100 if sells else None,
             "profit_factor": (sum(wins) / -sum(losses)) if losses and sum(losses) < 0 else None,
             "open_positions": len(state["positions"]),
+            "avg_invested": sum(c["invested"] for c in curve) / len(curve), "max_invested": max(c["invested"] for c in curve),
             "curve": [{"d": c["d"], "equity": round(c["equity"], 2), "bench": c["bench"]} for c in curve],
             "last_trades": [{k: t[k] for k in ("d", "symbol", "side", "qty", "price", "pnl", "reason")} for t in trades[-20:]]}
 
@@ -844,11 +1132,11 @@ def _sim_apply(kind, state, orders, ts, trades):
             if qty <= 0:
                 continue
             state["cash"] -= cost
-            state["positions"][sym] = {"qty": qty, "avg": price, "opened": ts, "stop": stop, "high": price,
-                                       "risk0": price - stop, "partial": False,
-                                       "sellable": _add_weekdays(ts, p["t_plus"]) if p["t_plus"] else ts}
+            held = state["positions"].get(sym)
+            state["positions"][sym] = merge_buy(held, qty, price, o["stop"] if held else stop, ts,
+                                                _add_weekdays(ts, p["t_plus"]) if p["t_plus"] else ts, o.get("plan_qty"))
             trades.append({"d": _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).strftime("%Y-%m-%d"), "symbol": sym,
-                           "side": "buy", "qty": qty, "price": price, "pnl": None, "reason": "entry"})
+                           "side": "buy", "qty": qty, "price": price, "pnl": None, "reason": o.get("reason") or "entry"})
         elif o["side"] == "sell":
             x = state["positions"].get(sym)
             if not x:

@@ -116,5 +116,13 @@
   "common.account": "Benutzername",
   "common.password": "Passwort",
   "common.default": "Standard",
-  "top.install_title": "Javis als eigene App installieren: öffnen über Desktop/Dock, kein Suchen mehr zwischen Tabs"
+  "top.install_title": "Javis als eigene App installieren: öffnen über Desktop/Dock, kein Suchen mehr zwischen Tabs",
+  "guide.open": "Javis-Benutzerhandbuch",
+  "guide.title": "Benutzerhandbuch",
+  "guide.search": "Im Handbuch suchen, z. B. telegram, Erinnerungen",
+  "guide.contents": "Inhalt",
+  "guide.github": "Auf GitHub öffnen",
+  "guide.loading": "Wird geladen...",
+  "guide.error": "Das Handbuch konnte nicht geladen werden. Später erneut versuchen.",
+  "guide.no_results": "Keine Seite erwähnt \"{q}\"."
 }

@@ -1,0 +1,63 @@
+/* User guide panel: the help button next to the Notifications bell (guide-panel.js). */
+.guide-trigger { padding: 0; width: 38px; }
+.guide-trigger svg {
+  width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+/* Above the mascot (z-index 390, style.css), which would otherwise sit on top of the open guide. */
+.guide-shade { position: fixed; inset: 0; z-index: 394; background: transparent; }
+.guide-shade[hidden], .guide-panel[hidden] { display: none; }
+.guide-panel {
+  position: fixed; top: 60px; right: 18px; z-index: 395;
+  width: min(560px, calc(100vw - 28px)); height: min(760px, calc(100dvh - 80px));
+  display: flex; flex-direction: column; overflow: hidden;
+  color: var(--text); background: var(--bg2);
+  border: 1px solid var(--accent-line); border-radius: 16px;
+  box-shadow: var(--shadow-3), 0 0 0 1px var(--surface-1);
+  backdrop-filter: blur(22px) saturate(1.25);
+  animation: notiIn .18s ease-out;
+}
+.guide-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  padding: 12px 12px 10px 16px; border-bottom: 1px solid var(--hairline);
+}
+.guide-title { flex: 1 1 auto; min-width: 0; font-size: 17px; font-weight: 700; }
+.guide-back, .guide-close, .guide-gh {
+  border: 0; background: transparent; color: var(--text2); cursor: pointer;
+  font: inherit; font-size: 13px; border-radius: 8px; padding: 6px 8px; text-decoration: none;
+  white-space: nowrap;
+}
+.guide-back:hover, .guide-close:hover, .guide-gh:hover { color: var(--text-hi); background: var(--surface-2); }
+.guide-back[hidden], .guide-gh[hidden] { display: none; }
+.guide-close { font-size: 20px; line-height: 1; padding: 4px 10px; }
+.guide-search-row { flex: 0 0 auto; padding: 10px 14px; border-bottom: 1px solid var(--hairline); }
+.guide-search {
+  width: 100%; box-sizing: border-box; height: 36px; padding: 0 12px;
+  border: 1px solid var(--border); border-radius: 9px;
+  color: var(--text); background: var(--field-bg); font: inherit; font-size: 14px;
+}
+.guide-search:focus { outline: none; border-color: var(--accent); }
+.guide-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 6px 10px 16px; }
+.guide-sec h3 {
+  margin: 14px 6px 6px; color: var(--text3); font-size: 11.5px; font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase;
+}
+.guide-item {
+  display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left;
+  padding: 9px 10px; border: 0; border-radius: 10px; background: transparent;
+  color: var(--text); font: inherit; cursor: pointer;
+}
+.guide-item:hover, .guide-item:focus-visible { background: var(--surface-2); outline: none; }
+.guide-item.child { padding-left: 26px; }
+.guide-item-title { font-size: 14px; font-weight: 600; }
+.guide-item-desc { color: var(--text3); font-size: 12.5px; line-height: 1.45; }
+.guide-note { padding: 24px 12px; color: var(--text3); font-size: 13.5px; text-align: center; }
+.guide-err { color: var(--danger, #d14343); }
+.guide-doc.ne-prev { border-left: none; background: transparent; padding: 6px 8px; font-size: 14px; }
+.guide-doc table { border-collapse: collapse; display: block; overflow-x: auto; margin: .5em 0; }
+.guide-doc th, .guide-doc td { border: 1px solid var(--border); padding: 5px 8px; vertical-align: top; }
+
+@media (max-width: 640px) {
+  .guide-panel { top: 0; right: 0; left: 0; bottom: 0; width: auto; height: auto; border-radius: 0; }
+  .guide-trigger { width: 34px; min-width: 34px; height: 32px; }
+}

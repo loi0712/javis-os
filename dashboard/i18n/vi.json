@@ -7657,5 +7657,13 @@
   "cl.org.skip.changed": "đã đổi từ lúc lập kế hoạch",
   "cl.org.skip.missing": "không còn ở chỗ cũ",
   "cl.org.skip.os_error": "không chuyển được, thư mục chỉ đọc?",
-  "cl.org.skip.outside_target": "chỗ mới nằm ngoài thư mục đích"
+  "cl.org.skip.outside_target": "chỗ mới nằm ngoài thư mục đích",
+  "guide.open": "Hướng dẫn sử dụng Javis",
+  "guide.title": "Hướng dẫn sử dụng",
+  "guide.search": "Tìm trong hướng dẫn, ví dụ: telegram, nhắc hẹn",
+  "guide.contents": "Mục lục",
+  "guide.github": "Mở trên GitHub",
+  "guide.loading": "Đang tải...",
+  "guide.error": "Không tải được hướng dẫn. Thử lại sau.",
+  "guide.no_results": "Không thấy trang nào có \"{q}\"."
 }

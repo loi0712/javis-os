@@ -8256,5 +8256,43 @@
    "GET"
   ],
   "trong": null
+ },
+ {
+  "order": 829,
+  "type": "_IncludedRouter",
+  "path": null,
+  "name": null,
+  "methods": [],
+  "trong": null
+ },
+ {
+  "order": 830,
+  "type": "APIRoute",
+  "path": "/guide/index",
+  "name": "guide_index",
+  "methods": [
+   "GET"
+  ],
+  "trong": 829
+ },
+ {
+  "order": 831,
+  "type": "APIRoute",
+  "path": "/guide/doc",
+  "name": "guide_doc",
+  "methods": [
+   "GET"
+  ],
+  "trong": 829
+ },
+ {
+  "order": 832,
+  "type": "APIRoute",
+  "path": "/guide/search",
+  "name": "guide_search",
+  "methods": [
+   "GET"
+  ],
+  "trong": 829
  }
 ]

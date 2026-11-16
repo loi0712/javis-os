@@ -51,6 +51,12 @@
           }
         }
       }
+      // The guide button (guide-panel.js) always sits right before the bell, wherever the bell is.
+      var guideTrigger = document.getElementById("guideTrigger");
+      if (guideTrigger && notificationTrigger && notificationTrigger.parentElement
+          && guideTrigger.nextSibling !== notificationTrigger) {
+        notificationTrigger.parentElement.insertBefore(guideTrigger, notificationTrigger);
+      }
     }
 
     // ---- 2) Nhóm Hệ thống: mobile dời vào đáy ngăn kéo, desktop trả về chỗ cũ ----

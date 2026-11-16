@@ -75,6 +75,17 @@
       </div>
       <!-- NHÓM PHẢI: chuông Thông báo + nút đổi tông (LUÔN hiện) + cụm nút cockpit (ẩn ở trang quản lý) -->
       <div class="hud-top-right">
+        <!-- Hướng dẫn sử dụng (guide-panel.js): đọc docs/ ngay trong app, cạnh chuông Thông báo. -->
+        <button class="notification-trigger guide-trigger" id="guideTrigger" type="button"
+                aria-haspopup="dialog" aria-expanded="false" aria-controls="guidePanel"
+                title="Hướng dẫn sử dụng Javis" data-i18n-title="guide.open"
+                aria-label="Hướng dẫn sử dụng Javis" data-i18n-aria="guide.open">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"></circle>
+            <path d="M9.6 9.3a2.5 2.5 0 0 1 4.85.85c0 1.65-2.45 2.2-2.45 3.6"></path>
+            <path d="M12 17h.01"></path>
+          </svg>
+        </button>
         <button class="notification-trigger" id="notificationTrigger" type="button"
                 aria-haspopup="dialog" aria-expanded="false" title="Mở hộp thư Thông báo" data-i18n-title="top.notifications">
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1165,7 +1176,7 @@
   <script src="/static/messenger-connect.js?v=3"></script>
   <script src="/static/voice-catalog.js?v=1"></script>
   <script src="/static/console.js?v=208"></script>
-  <script src="/static/mobile-chat.js?v=16"></script>
+  <script src="/static/mobile-chat.js?v=17"></script>
   <script src="/static/brain-view.js?v=1"></script>
   <script src="/static/push.js?v=3"></script>
   <script src="/static/install-nudge.js?v=2"></script>
@@ -1173,6 +1184,9 @@
   <link rel="stylesheet" href="/static/star-nudge.css?v=3">
   <script src="/static/star-nudge.js?v=2"></script>
   <script src="/static/notifications.js?v=11"></script>
+  <!-- Hướng dẫn sử dụng cạnh chuông Thông báo: đọc docs/ qua /guide/*, xem server/routes/guide.py. -->
+  <link rel="stylesheet" href="/static/guide-panel.css?v=1">
+  <script src="/static/guide-panel.js?v=1"></script>
   <!-- Linh vật ở mép màn hình. Nạp SAU app.js vì nó chỉ được app.js gọi vào
        (setOrbState -> JavisPet.setState), và sau console.js để trang Cài đặt vẽ được thẻ chọn. -->
   <!-- Mascot menu the owner arranges (Settings > Mascot): load BEFORE pet.js, which builds its menu from it. -->

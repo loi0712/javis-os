@@ -7657,5 +7657,13 @@
   "cl.org.skip.changed": "changed since the plan",
   "cl.org.skip.missing": "no longer there",
   "cl.org.skip.os_error": "could not move, read-only folder?",
-  "cl.org.skip.outside_target": "new place is outside the target"
+  "cl.org.skip.outside_target": "new place is outside the target",
+  "guide.open": "Javis user guide",
+  "guide.title": "User guide",
+  "guide.search": "Search the guide, e.g. telegram, reminders",
+  "guide.contents": "Contents",
+  "guide.github": "Open on GitHub",
+  "guide.loading": "Loading...",
+  "guide.error": "Could not load the guide. Try again later.",
+  "guide.no_results": "No page mentions \"{q}\"."
 }

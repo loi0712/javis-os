@@ -31095,3 +31095,10 @@ async def plan_limits_get(goi: int = 0):
                "grok": plan_limits.ten_goi(grok_k.get("plan") or "", "grok"), "agy": ""}
     return {"claude": d.get("claude"), "codex": d.get("codex"), "grok": d.get("grok"), "agy": d.get("agy"),
             "plan": co_goi, "ten_goi": ten, "nguong": {"canh_bao": plan_limits.CANH_BAO, "sat": plan_limits.SAT}}
+
+
+# User guide behind the help button next to the Notifications bell (owner request 2026-11-16), see
+# server/routes/guide.py. Registered LAST so route_table.json only grows at the end.
+import routes.guide as guide_routes   # noqa: E402
+
+guide_routes.register(app, guide_routes.GuideDeps(docs_dir=lambda: PROJECT_ROOT / "docs"))

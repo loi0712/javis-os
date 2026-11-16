@@ -33,7 +33,7 @@
     q: { vn: "", world: "", crypto: "" }, filter: { vn: "all", world: "all", crypto: "all" },
     watchOnly: { vn: false, world: false, crypto: false }, outlook: "vn", ro: null, tip: null, modal: null,
     liveBusy: false, liveOk: false, bg: null, acc: {},
-    ppKind: "vn", pp: {}, ppSim: {}, ppOpen: {},
+    ppKind: "vn", pp: {}, ppSim: {}, ppOpen: {}, learn: {}, learnBusy: {}, fac: {}, facOpen: {},
   };
 
   // ------------------------------------------------------------------ formatting
@@ -786,6 +786,8 @@
       if (svg) bindCurveHover(svg, svg._pts || ppCurvePoints(d.curve || [], d.stats && d.stats.start_cash));
       var sim = S.ppSim[kind];
       if (sim) paintSim(sim);
+      loadLearn(kind);
+      loadFac(kind);
     });
   }
   function planHtml(plan) {
@@ -798,10 +800,15 @@
       T("mk.pp.plan.stop", { a: num(plan.stop_atr, 1), lo: Math.round(plan.stop_min * 100), hi: Math.round(plan.stop_max * 100) }),
       T("mk.pp.plan.trail", { a: num(plan.trail_atr, 1), r: num(e.take_profit_r, 0) }),
       T("mk.pp.plan.exposure", { on: Math.round(ex.risk_on * 100), ne: Math.round(ex.neutral * 100) }),
+      e.ramp_weeks ? T("mk.pp.plan.ramp", { f: Math.round((e.ramp_floor || 0.3) * 100), w: e.ramp_weeks }) : null,
+      e.first_tranche < 1 ? T("mk.pp.plan.tranche", { p: Math.round(e.first_tranche * 100), r: num(e.add_at_r || 1, 0) }) : null,
+      k === "world" ? T("mk.pp.plan.core_dca", { n: e.core_tranches || 4 }) : null,
+      e.defend ? T("mk.pp.plan.defend", { a: num(e.defend_trail_atr || 2, 0), n: e.defend_max_sells || 2, c: Math.round(((ex.risk_off || 0.3) + 0.1) * 100) }) : null,
       T("mk.pp.plan.timing"),
       T("mk.pp.plan.fees_" + k),
       T("mk.pp.plan.schedule_" + k),
     ];
+    lines = lines.filter(function (x) { return x; });
     return '<ul class="mk-plan">' + lines.map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") + "</ul>";
   }
   function simCard(kind) {
@@ -810,12 +817,160 @@
       [120, 250].map(function (n) { return '<button type="button" class="mk-btn" data-ppsim="' + n + '">' + esc(T("mk.pp.sim.run", { n: n })) + "</button>"; }).join("") +
       '</div><div id="mkSimOut"></div></div>';
   }
+  // ------------------------------------------------------------------ self-review (market_learn) and sector drivers (market_factors)
+  function learnCard(kind) {
+    var d = S.learn[kind];
+    var at = d && d.review ? '<span class="mk-sub">' + esc(T("mk.pp.learn.at", { t: dt(d.review.at) })) + "</span>" : "";
+    return '<div class="mk-card mk-sec" id="mkLearn"><h3>' + IC("brain") + esc(T("mk.pp.learn.title")) + at + infoBtn(T("mk.pp.learn.title")) + "</h3>" +
+      infoBody(esc(T("mk.pp.learn.info"))) + '<div id="mkLearnBody">' + (d ? learnHtml(d) : '<div class="mk-skel" style="height:120px"></div>') + "</div></div>";
+  }
+  function learnHtml(d) {
+    var busy = !!d.running || !!S.learnBusy[d.kind];
+    var h = '<div class="mk-tools"><button type="button" class="mk-btn' + (busy ? " spin" : "") + '" data-pplearn="run"' + (busy ? " disabled" : "") + ">" +
+      IC("refresh-cw") + "<span>" + esc(T(busy ? "mk.pp.learn.running" : "mk.pp.learn.run")) + "</span></button>";
+    var rv = d.review;
+    if (rv) h += '<span class="mk-muted">' + esc(T("mk.pp.learn.meta", { d: rv.days || 0, n: num(rv.samples || 0, 0), c: rv.closed || 0 })) + "</span>";
+    h += "</div>";
+    if (!rv) return h + '<p class="mk-muted">' + esc(T("mk.pp.learn.none")) + "</p>";
+    var pend = d.pending || [];
+    h += '<h4 class="mk-h4">' + esc(T("mk.pp.learn.pending")) + "</h4>";
+    if (!pend.length) h += '<p class="mk-muted">' + esc(T("mk.pp.learn.no_prop")) + "</p>";
+    pend.forEach(function (c) {
+      h += '<div class="mk-prop"><div>' + esc(c.text) + '</div><div class="mk-tools"><button type="button" class="mk-btn pri" data-ppprop="' + c.id +
+        '|apply">' + IC("check") + "<span>" + esc(T("mk.pp.learn.apply")) + '</span></button><button type="button" class="mk-btn ghost" data-ppprop="' + c.id +
+        '|reject">' + IC("x") + "<span>" + esc(T("mk.pp.learn.reject")) + "</span></button></div></div>";
+    });
+    if (rv.rejected && rv.rejected.length) h += '<p class="mk-muted">' + esc(T("mk.pp.learn.rejected", { n: rv.rejected.length })) + "</p>";
+    if (d.insights && d.insights.length) {
+      h += '<h4 class="mk-h4">' + esc(T("mk.pp.learn.patterns")) + '</h4><ul class="mk-plan">' +
+        d.insights.map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") + "</ul>";
+    }
+    var gs = (rv.groups || []).filter(function (g) { return g.n >= 30; });
+    if (gs.length) {
+      h += '<h4 class="mk-h4">' + esc(T("mk.pp.learn.groups", { h: rv.horizon || 10 })) + '</h4><div class="mk-tblw"><table class="mk-tbl"><thead><tr><th class="l">' +
+        esc(T("mk.pp.fac.c.group")) + "</th><th>" + esc(T("mk.pp.learn.c.mean")) + "</th><th>" + esc(T("mk.pp.learn.c.win")) + "</th><th>" + esc(T("mk.pp.learn.c.n")) +
+        "</th></tr></thead><tbody>" + gs.map(function (g) {
+          return '<tr><td class="l">' + esc(g.name) + '</td><td class="' + (g.mean >= 0 ? "mk-up" : "mk-down") + '">' + pct(g.mean) + "</td><td>" + num(g.win, 0) +
+            "%</td><td>" + num(g.n, 0) + "</td></tr>";
+        }).join("") + "</tbody></table></div>";
+    }
+    var rules = (d.rules && d.rules.rules || []).filter(function (r) { return r.changed; });
+    var logs = d.rules && d.rules.log || [];
+    h += '<h4 class="mk-h4">' + esc(T("mk.pp.learn.rules")) + "</h4>";
+    if (!rules.length) h += '<p class="mk-muted">' + esc(T("mk.pp.learn.no_rules")) + "</p>";
+    rules.forEach(function (r) {
+      var lg = logs.filter(function (l) { return l.key === r.key && !l.undone; })[0];
+      var val = r.value_text != null ? r.value_text : String(r.value);
+      h += '<div class="mk-prop"><div><b>' + esc(r.name) + "</b>: " + esc(r.key === "avoid_sectors" ? val : String(r.default) + " → " + val) + "</div>" +
+        (lg ? '<div class="mk-tools"><button type="button" class="mk-btn ghost" data-ppundo="' + lg.id + '">' + IC("rotate-ccw") + "<span>" +
+          esc(T("mk.pp.learn.undo")) + "</span></button></div>" : "") + "</div>";
+    });
+    if (d.history && d.history.length) {
+      h += '<details class="mk-sec"><summary class="mk-sum">' + esc(T("mk.pp.learn.history")) + '</summary><ul class="mk-plan">' + d.history.map(function (c) {
+        return "<li>" + esc(c.text) + ' <span class="mk-chip' + (c.status === "applied" ? " up" : "") + '">' + esc(T("mk.pp.learn.st." + c.status)) + "</span></li>";
+      }).join("") + "</ul></details>";
+    }
+    return h;
+  }
+  function paintLearn(kind) {
+    var b = S.el && S.el.querySelector("#mkLearnBody");
+    if (b && S.ppKind === kind && S.learn[kind]) b.innerHTML = learnHtml(S.learn[kind]);
+  }
+  function loadLearn(kind) {
+    return api("/market/learn?kind=" + kind).then(function (d) {
+      if (!d || d.ok === false) return d;
+      S.learn[kind] = d;
+      if (!d.running) S.learnBusy[kind] = false;
+      paintLearn(kind);
+      if (d.running || S.learnBusy[kind]) setTimeout(function () { if (S.el && S.tab === "paper" && S.ppKind === kind) loadLearn(kind); }, 8000);
+      return d;
+    });
+  }
+  function learnRun() {
+    var kind = S.ppKind;
+    S.learnBusy[kind] = true;
+    paintLearn(kind);
+    api("/market/learn/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: kind }) }).then(function (r) {
+      if (r && r.ok === false && r.error) { S.learnBusy[kind] = false; alert(r.error); }
+      setTimeout(function () { loadLearn(kind); }, 4000);
+    });
+  }
+  function learnDecide(id, action) {
+    if (action === "apply" && !confirm(T("mk.pp.learn.confirm"))) return;
+    var kind = S.ppKind;
+    api("/market/learn/decide", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: +id, action: action }) }).then(function (r) {
+      if (r && r.ok === false && r.error) alert(r.error);
+      loadLearn(kind);
+      drawPaper(true);
+    });
+  }
+  function learnUndo(id) {
+    var kind = S.ppKind;
+    api("/market/learn/undo", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: +id }) }).then(function (r) {
+      if (r && r.ok === false && r.error) alert(r.error);
+      loadLearn(kind);
+      drawPaper(true);
+    });
+  }
+
+  function facCard(kind) {
+    var d = S.fac[kind];
+    return '<div class="mk-card mk-sec" id="mkFac"><h3>' + IC("compass") + esc(T("mk.pp.fac.title")) + infoBtn(T("mk.pp.fac.title")) + "</h3>" +
+      infoBody(esc(T("mk.pp.fac.info"))) + '<div id="mkFacBody">' + (d ? facHtml(d) : '<div class="mk-skel" style="height:160px"></div>') + "</div></div>";
+  }
+  function windChip(score) {
+    if (!fin(score)) return '<span class="mk-chip">-</span>';
+    var k = score > 33 ? "tail" : score < -33 ? "head" : "mixed";
+    return '<span class="mk-chip ' + (k === "tail" ? "up" : k === "head" ? "down" : "") + '">' + esc(T("mk.pp.fac." + k)) + " " + (score > 0 ? "+" : "") + score + "</span>";
+  }
+  function facHtml(d) {
+    var gs = d.groups || [];
+    if (!gs.length) return '<p class="mk-muted">' + esc(T("mk.pp.fac.empty")) + "</p>";
+    return '<div class="mk-tblw"><table class="mk-tbl"><thead><tr><th class="l">' + esc(T("mk.pp.fac.c.group")) + "</th><th>" + esc(T("mk.pp.fac.c.count")) + "</th><th>" +
+      esc(T("mk.pp.fac.c.score")) + "</th><th>" + esc(T("mk.pp.fac.c.rs")) + "</th></tr></thead><tbody>" + gs.map(function (g) {
+        var open = S.facOpen[d.kind + "|" + g.key];
+        var row = '<tr class="mk-click" data-ppfac="' + esc(g.key) + '"><td class="l">' + IC(open ? "chevron-down" : "chevron-right") + esc(g.name) + "</td><td>" + g.count +
+          "</td><td>" + windChip(g.score) + '</td><td class="' + (fin(g.rs_1m) ? (g.rs_1m >= 0 ? "mk-up" : "mk-down") : "") + '">' + pct(g.rs_1m) + "</td></tr>";
+        if (open) row += '<tr><td colspan="4" class="l">' + facDetail(g) + "</td></tr>";
+        return row;
+      }).join("") + "</tbody></table></div>";
+  }
+  function facDetail(g) {
+    var h = '<ul class="mk-plan">' + (g.drivers || []).map(function (x) {
+      if (x.missing) return "<li><b>" + esc(x.name) + "</b>: " + esc(x.why) + ' <span class="mk-muted">' + esc(T("mk.pp.fac.nodata")) + "</span></li>";
+      var c = Math.abs(x.corr || 0), strength = c >= 0.4 ? "strong" : c >= 0.2 ? "moderate" : "weak";
+      var meas = fin(x.corr) ? T("mk.pp.fac.corr", { c: num(x.corr, 2), s: T("mk.pp.fac." + strength) }) + (x.confirmed === false ? ", " + T("mk.pp.fac.unconfirmed") : "") : "";
+      var now = T(x.trend > 0 ? "mk.pp.fac.now_up" : x.trend < 0 ? "mk.pp.fac.now_down" : "mk.pp.fac.now_flat") + (fin(x.chg_1m) ? " (" + pct(x.chg_1m) + ")" : "");
+      var eff = x.effect > 0 ? '<span class="mk-chip up">' + esc(T("mk.pp.fac.tail")) + "</span>" : x.effect < 0 ? '<span class="mk-chip down">' + esc(T("mk.pp.fac.head")) +
+        "</span>" : '<span class="mk-chip">' + esc(T("mk.pp.fac.mixed")) + "</span>";
+      return "<li><b>" + esc(x.name) + "</b> (" + esc(T(x.sign > 0 ? "mk.pp.fac.same" : "mk.pp.fac.opp")) + "): " + esc(x.why) + '<br><span class="mk-muted">' +
+        esc(meas ? meas + " · " + now : now) + "</span> " + eff + "</li>";
+    }).join("") + "</ul>";
+    if (g.watch && g.watch.length) h += '<div class="mk-muted mk-sec">' + esc(T("mk.pp.fac.watch")) + ": " + esc(g.watch.join("; ")) + "</div>";
+    h += '<div class="mk-muted mk-sec">' + esc(T("mk.pp.fac.members")) + ": " + esc((g.members || []).join(", ")) + "</div>";
+    return h;
+  }
+  function paintFac(kind) {
+    var b = S.el && S.el.querySelector("#mkFacBody");
+    if (b && S.ppKind === kind && S.fac[kind]) b.innerHTML = facHtml(S.fac[kind]);
+  }
+  function loadFac(kind) {
+    var c = S.fac[kind];
+    if (c && Date.now() - (c._t || 0) < 15 * 60 * 1000) { paintFac(kind); return; }
+    api("/market/factors?kind=" + kind).then(function (d) {
+      if (!d || d.ok === false) return;
+      d._t = Date.now();
+      S.fac[kind] = d;
+      paintFac(kind);
+    });
+  }
+
   function paperHtml(d) {
     var kind = d.kind;
     if (!d.started) {
       return '<div class="mk-card"><h3>' + IC("list-checks") + esc(T("mk.pp.plan.title", { a: T("mk.pp.acc." + kind) })) + "</h3>" + planHtml(d.plan) +
         '<div class="mk-tools mk-sec"><button type="button" class="mk-btn pri" data-pp="start">' + IC("play") + "<span>" + esc(T("mk.pp.start")) +
-        "</span></button></div></div>" + simCard(kind);
+        "</span></button></div></div>" + learnCard(kind) + facCard(kind) + simCard(kind);
     }
     var st = d.stats || {}, pos = d.positions || [], log = d.log || [];
     var head = '<div class="mk-tools"><span class="mk-chip ' + (d.running ? "up" : "") + '">' + IC(d.running ? "play" : "pause") +
@@ -848,7 +1003,7 @@
       '<div class="mk-card mk-sec"><h3>' + IC("hourglass") + esc(T("mk.pp.watch")) + '<span class="mk-sub">' + esc(T("mk.pp.watch_sub")) + "</span></h3>" + watchHtml(kind, watch) + "</div>" +
       '<div class="mk-card mk-sec"><h3>' + IC("list") + esc(T("mk.pp.trades")) + '<span class="mk-sub">' + esc(T("mk.pp.trades_sub")) + "</span></h3>" + tradesHtml(d) + "</div>" +
       '<div class="mk-card mk-sec"><h3>' + IC("clock") + esc(T("mk.pp.log")) + "</h3>" + logHtml(d) + "</div>" +
-      '<details class="mk-card mk-sec"><summary class="mk-sum">' + esc(T("mk.pp.plan.title", { a: T("mk.pp.acc." + kind) })) + "</summary>" + planHtml(d.plan) + "</details>" + simCard(kind);
+      '<details class="mk-card mk-sec"><summary class="mk-sum">' + esc(T("mk.pp.plan.title", { a: T("mk.pp.acc." + kind) })) + "</summary>" + planHtml(d.plan) + "</details>" + learnCard(kind) + facCard(kind) + simCard(kind);
   }
   function ppCurvePoints(curve, start) {
     var b0 = null;
@@ -1280,6 +1435,13 @@
     var ppk = t.closest("[data-ppk]");
     if (ppk) { S.ppKind = ppk.dataset.ppk; S.ppAt = 0; drawBody(); return; }
     if (t.closest("[data-pptg]")) { togglePPTg(); return; }
+    if (t.closest('[data-pplearn="run"]')) { learnRun(); return; }
+    var ppr = t.closest("[data-ppprop]");
+    if (ppr) { var pr = ppr.dataset.ppprop.split("|"); learnDecide(pr[0], pr[1]); return; }
+    var ppu = t.closest("[data-ppundo]");
+    if (ppu) { learnUndo(ppu.dataset.ppundo); return; }
+    var ppf = t.closest("[data-ppfac]");
+    if (ppf) { var fk = S.ppKind + "|" + ppf.dataset.ppfac; S.facOpen[fk] = !S.facOpen[fk]; paintFac(S.ppKind); return; }
     var ppa = t.closest("[data-pp]");
     if (ppa) { ppAction(ppa.dataset.pp); return; }
     var pps = t.closest("[data-ppsim]");
@@ -1585,6 +1747,6 @@
 
   var api_ = { mount: mount, unmount: unmount };
   // Pure helpers for Node tests.
-  api_._test = { squarify: squarify, niceTicks: niceTicks, sigOf: sigOf, fngKey: fngKey, pct: pct, dir: dir };
+  api_._test = { squarify: squarify, niceTicks: niceTicks, sigOf: sigOf, fngKey: fngKey, pct: pct, dir: dir, learnHtml: learnHtml, facHtml: facHtml, S: S };
   window.JavisMarkets = api_;
 })();

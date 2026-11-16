@@ -92,10 +92,85 @@ check("T+2 settles two weekdays later", mp._add_weekdays(1794193200, 2) - 179419
 spy = row("SPY", price=500, group="etf", sma200=450)
 res = mp.decide("world", {"cash": 20000, "positions": {}, "recent_sells": {}}, [spy, row("AAA", group="stock")], {"label": "risk_off"}, NOW, True)
 core = [o for o in res["orders"] if o["side"] == "buy" and o["reason"] == "core"]
-check("world core buys the index ETF even when stock picking is off", [o["symbol"] for o in core] == ["SPY"] and core[0]["qty"] == math.floor(20000 * 0.45 / 500.25))
+check("world core buys a weekly DCA tranche of the index ETF even when stock picking is off",
+      [o["symbol"] for o in core] == ["SPY"] and core[0]["qty"] == math.floor(20000 * 0.45 / 4 / 500.25), core)
+held_spy = {"qty": 4, "avg": 500.0, "opened": NOW - 3 * 86400, "last_add": NOW - 3 * 86400, "stop": 441, "high": 500, "risk0": 59, "partial": False, "sellable": 0}
+res = mp.decide("world", {"cash": 18000, "positions": {"SPY": held_spy}, "recent_sells": {}}, [spy], {"label": "risk_off"}, NOW, True)
+check("core DCA waits a week between tranches", not [o for o in res["orders"] if o["side"] == "buy"]
+      and any(s["why"] == "core_dca_wait" for s in res["log"]["skipped"]))
+res = mp.decide("world", {"cash": 18000, "positions": {"SPY": dict(held_spy, last_add=NOW - 8 * 86400)}, "recent_sells": {}}, [spy], {"label": "risk_off"}, NOW, True)
+top = [o for o in res["orders"] if o["side"] == "buy"]
+check("core DCA tops up a week later", top and top[0]["reason"] == "core_add")
 res = mp.decide("world", {"cash": 0, "positions": {"SPY": dict(pos, avg=500, stop=441)}}, [dict(spy, price=430)], ON, NOW, False)
 check("core leaves when the ETF breaks its MA200", res["orders"][0]["reason"] == "core_exit")
 check("crypto quantities can be fractional", mp._lot("crypto", 0.1234567) == 0.123456)
+
+# ---------------------------------------------------------------- capital deployment
+res = mp.decide("vn", {"cash": 1e9, "positions": {}, "recent_sells": {}}, [row("AAA")], ON, NOW, True, {"first_tranche": 0.5})
+b = [o for o in res["orders"] if o["side"] == "buy"][0]
+check("first_tranche 0.5 buys half the planned size first", b["plan_qty"] >= 2 * b["qty"] - 100 and b["qty"] > 0, b)
+res = mp.decide("vn", {"cash": 1e9, "positions": {}, "recent_sells": {}}, [row("AAA")], ON, NOW, True)
+check("Vietnam buys the whole size at once by default", [o for o in res["orders"] if o["side"] == "buy"][0]["qty"] == b["plan_qty"])
+check("crypto starts with half the size by default", mp.effective("crypto")[1]["first_tranche"] == 0.5 and mp.effective("vn")[1]["first_tranche"] == 1.0)
+check("ramp: a brand-new account may hold 30% in picks", abs(mp.ramp_cap(mp.ENTRY, NOW, NOW) - 0.3) < 1e-9)
+check("ramp: four weeks later the regime cap applies", mp.ramp_cap(mp.ENTRY, NOW - 28 * 86400, NOW) == 1.0)
+many = [row(f"S{i:02d}", score=60 - i) for i in range(12)]
+res = mp.decide("vn", {"cash": 1e9, "positions": {}, "recent_sells": {}, "started": NOW}, many, ON, NOW, True, {"first_tranche": 1.0})
+inv = sum(o["qty"] * o["price"] * 1000 for o in res["orders"] if o["side"] == "buy")
+check("ramp: day one invests at most 30% of the account", 0 < inv <= 0.3e9 * 1.01, inv)
+check("ramp: the rest waits with a reason", any(s["why"] == "ramp" for s in res["log"]["skipped"]))
+
+first = {"qty": 500, "avg": 100.0, "opened": NOW - 5 * 86400, "stop": 93.0, "high": 108.0, "risk0": 7.0, "partial": False,
+         "sellable": 0, "plan_qty": 1000, "adds": 0}
+res = mp.decide("vn", {"cash": 5e8, "positions": {"AAA": first}, "recent_sells": {}}, [row("AAA", price=108, sma20=104)], ON, NOW, True)
+add = [o for o in res["orders"] if o["side"] == "buy"]
+check("scale in: +1R in an intact trend buys the rest", add and add[0]["reason"] == "add" and add[0]["qty"] == 500, res["orders"])
+check("scale in: the stop moves up to the first entry", add and add[0]["stop"] == 100.0)
+res = mp.decide("vn", {"cash": 5e8, "positions": {"AAA": dict(first, adds=1)}, "recent_sells": {}}, [row("AAA", price=108, sma20=104)], ON, NOW, True)
+check("scale in happens once", not [o for o in res["orders"] if o["side"] == "buy"])
+res = mp.decide("vn", {"cash": 5e8, "positions": {"AAA": first}, "recent_sells": {}}, [row("AAA", price=104)], ON, NOW, True)
+check("no add before the position proves itself", not [o for o in res["orders"] if o["side"] == "buy"])
+m = mp.merge_buy(first, 500, 108.0, 100.0, NOW, 0)
+check("merge: weighted average price, stop raised, one add counted", m["qty"] == 1000 and abs(m["avg"] - 104.0) < 1e-9 and m["stop"] == 100.0 and m["adds"] == 1)
+
+weak = {f"W{i}": {"qty": 3000, "avg": 100.0, "opened": NOW - 20 * 86400, "stop": 80.0, "high": 100.0, "risk0": 20.0, "partial": False, "sellable": 0}
+        for i in range(4)}
+rows_w = [row(f"W{i}", price=98, score=10 + i, sma50=95) for i in range(4)]
+down = {"label": "risk_off", "bench_up": False}
+res = mp.decide("vn", {"cash": 0, "positions": weak, "recent_sells": {}}, rows_w, down, NOW, True)
+trim = [o for o in res["orders"] if o.get("reason") == "defend"]
+check("defend: a falling market trims the weakest picks first", [o["symbol"] for o in trim] == ["W0", "W1"], res["orders"])
+check("defend: the log says the account is defending", res["log"]["defending"] is True)
+res = mp.decide("vn", {"cash": 0, "positions": weak, "recent_sells": {}}, rows_w, down, NOW, False)
+check("defend trims only in the decision window", not [o for o in res["orders"] if o.get("reason") == "defend"])
+res = mp.decide("vn", {"cash": 0, "positions": weak, "recent_sells": {}}, rows_w, down, NOW, True, {"defend": 0})
+check("defend can be switched off", not [o for o in res["orders"] if o.get("reason") == "defend"])
+res = mp.decide("vn", {"cash": 0, "positions": weak, "recent_sells": {}}, rows_w, {"label": "risk_off", "bench_up": True}, NOW, True)
+check("defend needs the benchmark under its MA50 too", not [o for o in res["orders"] if o.get("reason") == "defend"])
+
+# ---------------------------------------------------------------- learned rules
+st0 = {"cash": 1e9, "positions": {}, "recent_sells": {}}
+res = mp.decide("vn", st0, [row("AAA")], ON, NOW, True, {"avoid_sectors": ["bank"]})
+check("an avoided sector is skipped", not res["orders"] and res["log"]["skipped"][0]["why"] == "sector_avoid")
+res = mp.decide("vn", st0, [row("AAA", factor=-50)], ON, NOW, True, {"factor_min": -33})
+check("factor_min skips buys against a macro headwind", not res["orders"] and res["log"]["skipped"][0]["why"] == "factor_headwind")
+res = mp.decide("vn", st0, [row("AAA", factor=-50)], ON, NOW, True)
+check("the factor filter is off by default", [o for o in res["orders"] if o["side"] == "buy"])
+log = mp.set_rule("crypto", "pb_rsi_hi", 99)
+check("set_rule clamps to the allowed range", mp.rules_for("crypto")["pb_rsi_hi"] == 70 and log["old"] == 55)
+check("rule_view marks the change", [r for r in mp.rule_view("crypto")["rules"] if r["key"] == "pb_rsi_hi"][0]["changed"])
+mp.undo_rule(log["id"])
+check("undo puts the default back", "pb_rsi_hi" not in mp.rules_for("crypto"))
+check("undo works once", mp.undo_rule(log["id"]) is None)
+try:
+    mp.set_rule("crypto", "fee_buy", 0)
+    check("only TUNABLE rules can change", False)
+except ValueError:
+    check("only TUNABLE rules can change", True)
+mp.set_rule("crypto", "avoid_sectors", ["meme", "meme", "ai"])
+check("list rules are stored sorted and unique", mp.rules_for("crypto")["avoid_sectors"] == ["ai", "meme"])
+mp.set_rule("crypto", "avoid_sectors", [])
+check("setting a rule back to its default removes it", "avoid_sectors" not in mp.rules_for("crypto"))
 
 # ---------------------------------------------------------------- order book, report
 data = {"rows": [row("AAA"), row("BBB", score=-10)], "indices": [{"symbol": "VNINDEX", "price": 1700, "sma50": 1650}], "regime": {"label": "risk_on"}}
@@ -162,6 +237,52 @@ check("simulation runs on the archive", sim["ok"] and sim["days"] == 121, sim.ge
 check("simulation trades and reports against the benchmark", sim["trades"] > 0 and sim["bench_return"] is not None)
 check("simulation never trades the index itself", all(t["symbol"] != "VNINDEX" for t in sim["last_trades"]))
 check("simulation curve starts at the capital", abs(sim["curve"][0]["equity"] - 1e9) < 1)
+check("simulation reports exposure", 0 <= sim["avg_invested"] <= sim["max_invested"] <= 100)
+hist = mp.history_rows("vn", 120)
+again = mp.simulate("vn", 120, hist=hist)
+check("a replay on shared history rows gives the same result", abs(again["return_pct"] - sim["return_pct"]) < 1e-9)
+alt = mp.simulate("vn", 120, rules={"first_tranche": 1.0, "ramp_weeks": 0}, hist=hist)
+check("a replay can test another rule set", alt["ok"] and alt["trades"] >= 1)
+
+# ---------------------------------------------------------------- drivers and the weekly review
+import market_factors as mf  # noqa: E402
+import market_learn as ml  # noqa: E402
+check("VN rows group by sector", mf.group_of("vn", {"sector": "bank"}) == "bank")
+check("world stocks and coins have groups", mf.group_of("world", {"symbol": "NVDA"}) == "semis" and mf.group_of("crypto", {"id": "dogecoin"}) == "meme")
+check("every driver of every group is a known series", all(d in mf.DRIVERS for k in mf.GROUPS for g in mf.GROUPS[k].values() for d, *_ in g[0]))
+ds = [f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}" for i in range(80)]
+up = {"d": ds, "c": [100 + i for i in range(80)]}
+raw_k = {"world": {"^TNX": up}, "vn": {"VNINDEX": up}}
+check("factor score: a rising yield is a headwind for real estate, the rising market a tailwind",
+      mf.score_at("vn", "realestate", ds[-1], {"world": {"^TNX": up}}) == -100 and mf.score_at("vn", "other", ds[-1], raw_k) == 100)
+check("factor score uses only data up to the day", mf.score_at("vn", "other", ds[10], raw_k) is None or mf.score_at("vn", "other", ds[10], raw_k) == 0)
+x = [0.01 * ((i * 7) % 5 - 2) for i in range(40)]
+c, beta = mf._corr_beta([2 * v for v in x], x)
+check("correlation and beta", abs(c - 1) < 1e-9 and abs(beta - 2) < 1e-9)
+fac = mf.analyze("vn", {"vn": mp.load_bars("vn"), "world": {}, "crypto": {}})
+check("sector analysis runs on the archive", fac.get("ok") and fac["groups"], fac)
+rv = ml.run_review("vn", notify=False, days=120)
+check("the weekly review runs and stores a study", rv.get("ok") and rv["study"]["n"] > 0, rv.get("error"))
+lt = ml.latest("vn")
+check("the page sees the last review", lt["review"] and lt["review"]["samples"] == rv["study"]["n"] and isinstance(lt["insights"], list))
+check("the report names the account", "VN" in ml.report_text("vn", rv) or "Vietnam" in ml.report_text("vn", rv))
+fake = {"n": 400, "mid": "2026-02-01", "pullback": True, "_aligned":
+        [{"d": "2026-01-15" if i % 2 else "2026-02-15", "rsi": 40 + (i % 20), "fwd": (1.0 if 40 + (i % 20) <= 50 else -1.0)} for i in range(400)],
+        "stops": {}, "aligned": {"h1": {"mean": 0}, "h2": {"mean": 0}}, "groups": {}, "factor": {}}
+cs = ml.candidates("vn", fake, {})
+rsi_c = [c for c in cs if c["kind_of"] == "rsi"]
+check("a band that loses in both halves is proposed one step narrower", rsi_c and rsi_c[0]["key"] == "pb_rsi_hi" and rsi_c[0]["new"] == 50, cs)
+noisy = dict(fake, _aligned=[dict(s, fwd=(s["fwd"] if s["d"] < "2026-02-01" else -s["fwd"])) for s in fake["_aligned"]])
+check("a pattern seen in one half only is not proposed", not [c for c in ml.candidates("vn", noisy, {}) if c["kind_of"] == "rsi"])
+con = ml._db()
+pid = con.execute("INSERT INTO paper_proposals (kind, review, created, status, key, old, new, data) "
+                  "VALUES ('vn', 0, 0, 'pending', 'pb_rsi_hi', '55', '50', '{}')").lastrowid
+con.commit()
+con.close()
+r = ml.decide_proposal(pid, "apply")
+check("applying a proposal changes the rule and logs it", r["ok"] and mp.rules_for("vn").get("pb_rsi_hi") == 50 and r["log"]["new"] == 50)
+check("a decided proposal cannot be applied twice", not ml.decide_proposal(pid, "apply")["ok"])
+mp.undo_rule(r["log"]["id"])
 check("an empty archive cannot be simulated", not mp.simulate("crypto", 120)["ok"])
 
 if _fails:

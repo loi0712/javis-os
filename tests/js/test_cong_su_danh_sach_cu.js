@@ -27,6 +27,8 @@ function dung() {
     S: { agents: [], workflows: [] }, daTai: false, lanDung: 1, _brain: "brain",
     brain() { return ctx._brain; },
     sapXep: (ds) => ds,
+    // 2026-11-16: the list also orders by when each partner was last opened (browser storage). Not about this race.
+    mocMo: () => ({}),
     api: (url) => new Promise((res) => cho.push({ url, res })),
     cho,
     // T0 nhóm chat team: taiDanhSach mở lượt đọc trạng thái Cộng hưởng riêng sau khi có danh sách. Test này chỉ soi

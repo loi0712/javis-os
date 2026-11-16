@@ -70,17 +70,59 @@
   // Mục GHIM luôn đứng trước, trong nhóm ghim vẫn xếp theo mốc gần nhất như cũ. Ghim là lời
   // người dùng nói "cái này tôi dùng suốt", nên nó phải thắng mốc thời gian - không thì một
   // cộng sự ghim mà hai tuần không gọi sẽ tụt xuống cuối và cái ghim thành vô nghĩa.
-  function sapXep(ds, khoa) {
+  // `mo` (optional, owner 2026-11-16: "khi chọn các trợ lý thì phải chuyển lên đầu danh sách"): {slug: seconds} of when
+  // the user last OPENED each partner. Opening counts as using it, so the mark is the later of the two; before this a
+  // partner only moved up once a message went out, and with hundreds of Store assistants the one just picked stayed
+  // buried mid-list.
+  function sapXep(ds, khoa, mo) {
+    function moc(x) { return Math.max(Number(x[khoa] || 0), Number((mo && mo[x.slug]) || 0)); }
     return ds.slice().sort(function (a, b) {
       // Javis Core (0.185.0, `system`) is always first, ahead of the pinned ones.
       var sa = a.system ? 1 : 0, sb = b.system ? 1 : 0;
       if (sa !== sb) return sb - sa;
       var ga = a.pinned ? 1 : 0, gb = b.pinned ? 1 : 0;
       if (ga !== gb) return gb - ga;
-      var ma = Number(a[khoa] || 0), mb = Number(b[khoa] || 0);
+      var ma = moc(a), mb = moc(b);
       if (ma !== mb) return mb - ma;
       return String(a.name || "").localeCompare(String(b.name || ""), "vi");
     });
+  }
+  // When each partner was last opened, kept in this browser per brain and kind ("agent" / "workflow"). Only an order
+  // hint, so browser storage is enough: losing it just falls back to the chat / run times.
+  var KHOA_MO = "javis_ws_mo", MO_TOI_DA = 300;
+  function docMoHet() {
+    try { var v = JSON.parse(localStorage.getItem(KHOA_MO) || "{}"); return v && typeof v === "object" ? v : {}; }
+    catch (e) { return {}; }
+  }
+  function mocMo(loai) {
+    var dau = brain() + "|" + loai + "|", het = docMoHet(), ra = {};
+    Object.keys(het).forEach(function (k) { if (k.indexOf(dau) === 0) ra[k.slice(dau.length)] = Number(het[k]) || 0; });
+    return ra;
+  }
+  function ghiMo(loai, slug) {
+    if (!slug) return;
+    var het = docMoHet();
+    het[brain() + "|" + loai + "|" + slug] = Date.now() / 1000;
+    var ks = Object.keys(het);
+    // Keep only the newest marks: the map must not grow forever as partners come and go.
+    if (ks.length > MO_TOI_DA) {
+      ks.sort(function (a, b) { return het[a] - het[b]; }).slice(0, ks.length - MO_TOI_DA).forEach(function (k) { delete het[k]; });
+    }
+    try { localStorage.setItem(KHOA_MO, JSON.stringify(het)); } catch (e) {}
+  }
+  // The partner just opened goes to the top of the list (below Javis Core and the pinned ones) and stays in view.
+  function moLenDau(slug) {
+    ghiMo(S.loai, slug);
+    if (S.loai === "agent") S.agents = sapXep(S.agents, "last_chat_at", mocMo("agent"));
+    else S.workflows = sapXep(S.workflows, "last_run_at", mocMo("workflow"));
+  }
+  // Back to the top of the list, where the picked partner now sits under Javis Core; only if many pinned ones push it
+  // further down does the list scroll on to it.
+  function hienMucChon() {
+    var host = S.el && S.el.querySelector("#wsList");
+    if (host) host.scrollTop = 0;
+    var on = host && host.querySelector(".ws-item.on");
+    try { if (on && on.scrollIntoView) on.scrollIntoView({ block: "nearest" }); } catch (e) {}
   }
   // ---------- NHÓM: gom cộng sự theo field `group`, giống thư mục dự án bên Trò chuyện ----------
   // Chủ repo 20/09: "làm thêm phần gom nhóm giống bên trò chuyện để có thể gom nhiều agent
@@ -417,7 +459,7 @@
       var u = S.un[a.slug];
       if (u && Number(u.last_at) > Number(a.last_chat_at || 0)) a.last_chat_at = Number(u.last_at);
     });
-    S.agents = sapXep(S.agents, "last_chat_at");
+    S.agents = sapXep(S.agents, "last_chat_at", mocMo("agent"));
     var cur = S.loai === "agent" ? dangChon() : null;
     if (cur && dangXemCongSu(cur.slug) && S.un[cur.slug] && S.un[cur.slug].n) daDoc(cur.slug);
     return true;
@@ -508,8 +550,8 @@
     loadResonance().then(function (ok) { if (ok && active && S.loai === "agent") { veDanhSach(); veAuto(dangChon()); } });
     loadJobCounts().then(function (ok) { if (ok && active && S.loai === "agent") veDanhSach(); });
     loadUnread().then(function (ok) { if (ok && active && S.loai === "agent") veDanhSach(); });
-    S.agents = sapXep(r[0].agents, "last_chat_at");
-    S.workflows = sapXep(r[1].workflows.filter(function (w) { return w.status === "active"; }), "last_run_at");
+    S.agents = sapXep(r[0].agents, "last_chat_at", mocMo("agent"));
+    S.workflows = sapXep(r[1].workflows.filter(function (w) { return w.status === "active"; }), "last_run_at", mocMo("workflow"));
     daTai = true;
     return true;
   }
@@ -657,7 +699,7 @@
     taiDanhSach().then(function (moi) { if (moi === false || lanNay !== lanDung) return; if (pendingCommand) { var cmd = pendingCommand; pendingCommand = null; selectCommand(cmd); } else { veTrai(); chonMacDinh(); } }).catch(function () { if (lanNay !== lanDung) return; if (pendingCommand) { pendingCommand.resolve(false); pendingCommand = null; } veLoi(t("ws.err_list")); });
   }
   async function selectCommand(cmd) {
-    S.loai = cmd.kind; S.chon[cmd.kind] = cmd.slug; S.q = ""; S.nhom = "";
+    S.loai = cmd.kind; S.chon[cmd.kind] = cmd.slug; S.q = ""; S.nhom = ""; moLenDau(cmd.slug);
     luuChon(); veTrai();
     var item = dangChon();
     if (!item) { cmd.resolve(false); return; }
@@ -1171,7 +1213,7 @@
       b.addEventListener("focus", function () { hienTheMini(b); });
       b.addEventListener("blur", anTheMini);
       b.onclick = function () {
-        S.chon[S.loai] = b.dataset.slug; luuChon(); veDanhSach(); moPhien(dangChon(), false);
+        S.chon[S.loai] = b.dataset.slug; luuChon(); moLenDau(b.dataset.slug); veDanhSach(); hienMucChon(); moPhien(dangChon(), false);
         // Chọn xong thì đóng ngăn kéo - nhưng CHỈ ở khổ màn hình có ngăn kéo. Màn rộng lớp này
         // mang nghĩa ngược (đang ẩn cột), gỡ nó là bày lại cột người dùng vừa cố ý ẩn đi.
         if (heptLai()) S.el.querySelector("#wsPage").classList.remove("left-open");
@@ -1208,7 +1250,7 @@
     host.querySelectorAll(".ws-rs-confirm").forEach(function (b) {
       b.onclick = function (e) {
         e.stopPropagation();
-        S.chon[S.loai] = b.dataset.rsOpen; luuChon(); veDanhSach(); moPhien(dangChon(), false);
+        S.chon[S.loai] = b.dataset.rsOpen; luuChon(); moLenDau(b.dataset.rsOpen); veDanhSach(); hienMucChon(); moPhien(dangChon(), false);
         chonTabPhai("cai");
         datPhai(true, true);
       };
@@ -2063,7 +2105,7 @@
       if (ag) {
         ag.last_chat_at = Date.now() / 1000;
         // 0.205.0: the partner just written to moves to the top, and its chat stays read while it is on screen.
-        S.agents = sapXep(S.agents, "last_chat_at");
+        S.agents = sapXep(S.agents, "last_chat_at", mocMo("agent"));
         if (dangXemCongSu(ag.slug)) daDoc(ag.slug);
         if (active) veDanhSach();
         if (ag.system) docLaiTenCore(ag);   // a new name saved in chat shows at once

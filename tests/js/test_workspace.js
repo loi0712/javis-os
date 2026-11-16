@@ -25,6 +25,35 @@ check("xep quy trinh theo lan chay gan nhat", W.sapXep(wfs, "last_run_at").map(x
 const ags = [{ slug: "x", name: "Người viết", last_chat_at: 0 }, { slug: "y", name: "Javis", last_chat_at: 3 }];
 check("xep tro ly theo lan chat gan nhat", W.sapXep(ags, "last_chat_at").map(x => x.slug).join(",") === "y,x");
 
+// 2026-11-16 (owner): opening a partner puts it at the top, below Javis Core and the pinned ones.
+const ags2 = [
+  { slug: "core", name: "Javis Core", system: true, last_chat_at: 1 },
+  { slug: "pin", name: "Ghim", pinned: true, last_chat_at: 2 },
+  { slug: "chat", name: "Vừa nhắn", last_chat_at: 100 },
+  { slug: "kts", name: "Kiến trúc sư", last_chat_at: 0 },
+  { slug: "zz", name: "Ít dùng", last_chat_at: 0 },
+];
+check("opened just now: right after Core and the pinned ones",
+  W.sapXep(ags2, "last_chat_at", { kts: 200 }).map(x => x.slug).join(",") === "core,pin,kts,chat,zz");
+check("an older open does not beat a newer chat",
+  W.sapXep(ags2, "last_chat_at", { kts: 50 }).map(x => x.slug).join(",") === "core,pin,chat,kts,zz");
+check("opening never lifts a partner above Javis Core or a pinned one",
+  W.sapXep(ags2, "last_chat_at", { zz: 9e9 }).slice(0, 2).map(x => x.slug).join(",") === "core,pin");
+check("no open marks: the old order (no mark at all: by name)", W.sapXep(ags2, "last_chat_at").map(x => x.slug).join(",") === "core,pin,chat,zz,kts");
+check("workflows: opening moves one up too",
+  W.sapXep(wfs, "last_run_at", { d: 1000 }).map(x => x.slug).join(",") === "d,c,b,a");
+{
+  const src = fs.readFileSync(path.join(root, "dashboard", "workspace.js"), "utf8");
+  check("a click on a row marks it opened and re-sorts before drawing, then keeps it in view",
+    /S\.chon\[S\.loai\] = b\.dataset\.slug; luuChon\(\); moLenDau\(b\.dataset\.slug\); veDanhSach\(\); hienMucChon\(\);/.test(src));
+  check("opening from elsewhere (inbox, command) marks it opened too",
+    /S\.chon\[cmd\.kind\] = cmd\.slug;[^\n]*moLenDau\(cmd\.slug\);/.test(src));
+  check("every list load applies the open marks",
+    /sapXep\(r\[0\]\.agents, "last_chat_at", mocMo\("agent"\)\)/.test(src) && /"last_run_at", mocMo\("workflow"\)\)/.test(src));
+  check("the open marks are kept per brain and kind, and capped",
+    /brain\(\) \+ "\|" \+ loai \+ "\|" \+ slug/.test(src) && /MO_TOI_DA = \d+/.test(src));
+}
+
 // Lọc: tìm không dấu + nhóm
 const ds = [{ slug: "a", name: "Người viết", role: "viết", group: "Marketing" }, { slug: "b", name: "Kế toán", role: "sổ sách", group: "Finance" }];
 check("loc theo chu khong dau", W.loc(ds, "nguoi viet", "").map(x => x.slug).join() === "a");

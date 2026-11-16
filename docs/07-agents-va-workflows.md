@@ -17,7 +17,7 @@ Liên quan: chọn model cho agent xem [Models & engine](10-models-va-engine.md)
 
 Mở **Năng lực > Cộng sự** trên thanh bên của dashboard (mặc định tại cổng 7777). Trang có hai tab **Trợ lý | Quy trình**. Skills và Plugins vẫn nằm trong nhóm Năng lực.
 
-- Cột trái: chọn tab, tìm theo tên hoặc lọc theo tag (quy trình: theo nhóm), rồi chọn cộng sự. Trợ lý vừa trò chuyện và quy trình vừa chạy được xếp lên đầu.
+- Cột trái: chọn tab, tìm theo tên hoặc lọc theo tag (quy trình: theo nhóm), rồi chọn cộng sự. Cộng sự vừa mở, vừa trò chuyện hay vừa chạy được xếp lên đầu, ngay dưới Javis Core và các mục Đã ghim (quy trình ở chế độ xem theo nhóm thì lên đầu nhóm của nó). Thứ tự "vừa mở" nhớ theo trình duyệt đang dùng.
 - Cột giữa: khung chat của cộng sự đang chọn.
 - Cột phải: cài đặt và hội thoại của trợ lý, hoặc tiến độ và lịch sử chạy của quy trình.
 

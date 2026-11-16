@@ -17,7 +17,7 @@ Related: choosing an agent model in [Models & engines](10-models-and-engines.md)
 
 Open **Capabilities > Partners** in the dashboard sidebar (port 7777 by default). The page has **Agents | Workflows** tabs. Skills and Plugins remain in Capabilities.
 
-- Left: choose a tab, search or filter by tag (workflows: by group), then select a partner. Recently used agents and workflows appear first.
+- Left: choose a tab, search or filter by tag (workflows: by group), then select a partner. Partners you just opened, chatted with or ran come first, right below Javis Core and the pinned ones (a workflow in the grouped view goes to the top of its group). The "just opened" order is remembered by the browser you use.
 - Centre: chat with the selected partner.
 - Right: agent settings and conversations, or workflow progress and run history.
 

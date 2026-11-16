@@ -16,9 +16,10 @@ function check(name, ok) { console.log((ok ? "ok   " : "FAIL ") + name); if (!ok
 check("unread read with the list, one request per brain", /loadUnread\(\)\.then\(function \(ok\) \{ if \(ok && active && S\.loai === "agent"\) veDanhSach\(\); \}\);/.test(ws)
   && ws.includes('api("/agents/unread?brain=" + encodeURIComponent(b0))'));
 const lu = ws.slice(ws.indexOf("async function loadUnread()"), ws.indexOf("function henUnread()"));
-check("newest message moves a partner up (re-sort)", /a\.last_chat_at = Number\(u\.last_at\)/.test(lu) && /S\.agents = sapXep\(S\.agents, "last_chat_at"\);/.test(lu));
+// 2026-11-16: sapXep also takes the "last opened" marks (mocMo), so the call may carry a third argument.
+check("newest message moves a partner up (re-sort)", /a\.last_chat_at = Number\(u\.last_at\)/.test(lu) && /S\.agents = sapXep\(S\.agents, "last_chat_at"(, mocMo\("agent"\))?\);/.test(lu));
 const td = ws.slice(ws.indexOf("function onTurnDone(sid) {"), ws.indexOf("function onTurnDone(sid) {") + 900);
-check("a reply just written re-sorts too", /S\.agents = sapXep\(S\.agents, "last_chat_at"\);/.test(td) && /else if \(sid && S\.loai === "agent"\) henUnread\(\);/.test(td));
+check("a reply just written re-sorts too", /S\.agents = sapXep\(S\.agents, "last_chat_at"(, mocMo\("agent"\))?\);/.test(td) && /else if \(sid && S\.loai === "agent"\) henUnread\(\);/.test(td));
 check("events read the counts again", /\["javis:sessions-changed", "javis:agent-read"\]\.forEach\(function \(ev\) \{ window\.addEventListener\(ev, henUnread\); \}\);/.test(ws)
   && /data\.type === "agent_read"/.test(app));
 check("opening a partner's chat reads it", /if \(S\.loai === "agent"\) daDoc\(item\.slug\);/.test(ws) && ws.includes('api("/agents/opened"'));
